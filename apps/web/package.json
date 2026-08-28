@@ -14,13 +14,16 @@
   },
   "dependencies": {
     "@tabler/icons-react": "^3.46.0",
+    "@tanstack/react-form": "^1.33.5",
+    "@tanstack/react-query": "^5.102.8",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "interactjs": "^1.10.28",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "tailwind-merge": "^3.6.0",
-    "wouter": "^3.10.0"
+    "wouter": "^3.10.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@base-ui/react": "^1.7.0",

@@ -430,8 +430,11 @@ h1, h2, h3, p { margin: 0; }
 .card.gone { opacity: 0.6; }
 
 .joinbox { margin-top: 30px; }
-.inline-form { display: flex; gap: 8px; }
+.inline-form { display: flex; gap: 8px; align-items: flex-start; }
+.field-control { flex: 1; min-width: 0; }
 .inline-form button { flex: none; }
+.form-error { display: block; width: 100%; color: var(--danger); font-size: 0.78rem; text-align: left; }
+[aria-invalid="true"] { border-color: var(--danger) !important; }
 
 .fab {
   position: fixed;
@@ -476,6 +479,7 @@ h1, h2, h3, p { margin: 0; }
 .join-card h1 { font-size: 1.25rem; margin: 12px 0 8px; }
 .join-card .muted { font-size: 0.9rem; margin-bottom: 18px; }
 .stack { display: flex; flex-direction: column; gap: 10px; }
+.stack .form-error { margin-top: -4px; }
 .backlink { display: inline-block; margin-top: 16px; color: var(--muted); font-size: 0.85rem; }
 
 /* ---------------------------------------------------------- dialogs */
