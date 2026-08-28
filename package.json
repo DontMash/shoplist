@@ -1,0 +1,20 @@
+{
+  "name": "shoplist",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared shopping lists with realtime sync - invite-only via QR code/link, no accounts required.",
+  "packageManager": "pnpm@11.20.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm --filter @shoplist/server build && pnpm --filter @shoplist/web build",
+    "start": "pnpm --filter @shoplist/server start",
+    "dev": "pnpm --parallel --filter @shoplist/web --filter @shoplist/server dev",
+    "dev:server": "pnpm --filter @shoplist/server dev",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "icons": "pnpm --filter @shoplist/web icons"
+  }
+}
