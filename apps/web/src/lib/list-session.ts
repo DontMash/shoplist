@@ -423,10 +423,13 @@ class ListSessionImpl implements ListSession {
     if (options.autoStart !== false) this.start();
   }
 
-  public getSnapshot(): ListSessionSnapshot { return this.snapshot; }
-  public getStatus(): SessionStatus { return this.snapshot.status; }
-  public getLatestOutcome(): OperationOutcome | null { return this.snapshot.outcome; }
-  public subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  public readonly getSnapshot = (): ListSessionSnapshot => this.snapshot;
+  public readonly getStatus = (): SessionStatus => this.snapshot.status;
+  public readonly getLatestOutcome = (): OperationOutcome | null => this.snapshot.outcome;
+  public readonly subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
 
   public start(): void {
     if (this.started || this.closed) return;
