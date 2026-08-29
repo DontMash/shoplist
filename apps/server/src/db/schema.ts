@@ -11,7 +11,19 @@ export const lists = sqliteTable('lists', {
   ownerToken: text('owner_token').notNull(),
   createdAt: integer('created_at').notNull(),
   clearedAt: integer('cleared_at'),
+  revision: integer('revision').notNull().default(0),
 });
+
+/** Durable operation outcomes make websocket replay idempotent across restarts. */
+export const processedOperations = sqliteTable('processed_operations', {
+  listId: text('list_id').notNull(),
+  operationId: text('operation_id').notNull(),
+  status: text('status').notNull(),
+  revision: integer('revision').notNull(),
+  responseJson: text('response_json').notNull(),
+  terminal: integer('terminal', { mode: 'boolean' }).notNull().default(false),
+  processedAt: integer('processed_at').notNull(),
+}, (table) => [primaryKey({ columns: [table.listId, table.operationId] })]);
 
 export const items = sqliteTable('items', {
   id: text('id').primaryKey(),

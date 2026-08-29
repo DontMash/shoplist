@@ -38,6 +38,86 @@ describe('Store', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it('persists revisions and idempotent operation outcomes', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-operations-'));
+    const file = path.join(directory, 'db.sqlite');
+    const store = new Store(file);
+    const list = store.createList('Operations');
+    const add = store.applyOperation(list.id, {
+      operationId: 'op-add', kind: 'item:add', actorClientId: 'client-a',
+      payload: { tempItemId: 'temp-add', name: 'Milk', amount: '2 L' },
+    });
+    expect(add.ack).toMatchObject({ opId: 'op-add', status: 'accepted', revision: 1, tempItemId: 'temp-add' });
+    expect(add.ack.itemId).toBeTruthy();
+    expect(store.getList(list.id)?.revision).toBe(1);
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-add', kind: 'item:add', actorClientId: 'client-a',
+      payload: { tempItemId: 'temp-add', name: 'Duplicate' },
+    })).toMatchObject({ duplicate: true, ack: add.ack });
+    expect(store.getList(list.id)?.revision).toBe(1);
+
+    const itemId = add.ack.itemId as string;
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-update', kind: 'item:update', actorClientId: 'client-a',
+      payload: { id: itemId, patch: { amount: '3 L', collected: true } },
+    }).ack).toMatchObject({ status: 'accepted', revision: 2 });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-reject', kind: 'item:update', actorClientId: 'client-a',
+      payload: { id: itemId, patch: { name: ' ' } },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'name-required', reasonCode: 'name-required', revision: 2 });
+    expect(store.getList(list.id)?.revision).toBe(2);
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-empty-patch', kind: 'item:update', actorClientId: 'client-a', payload: { id: itemId, patch: {} },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'invalid-payload', revision: 2 });
+
+    const second = store.applyOperation(list.id, {
+      operationId: 'op-second', kind: 'item:add', actorClientId: null,
+      payload: { name: 'Bread' },
+    });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-delete', kind: 'item:delete', actorClientId: 'client-a',
+      payload: { id: second.ack.itemId },
+    }).ack).toMatchObject({ status: 'accepted', revision: 4 });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-clear', kind: 'list:clear', actorClientId: 'client-a', payload: {},
+    }).ack).toMatchObject({ status: 'accepted', revision: 5 });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-rename', kind: 'list:rename', actorClientId: 'client-a', payload: { name: 'Renamed' },
+    }).ack).toMatchObject({ status: 'accepted', revision: 6 });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-rename', kind: 'list:rename', actorClientId: 'client-a', payload: { name: 'Other' },
+    })).toMatchObject({ duplicate: true, ack: expect.objectContaining({ revision: 6 }) });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-not-owner', kind: 'list:delete', actorClientId: 'client-b', payload: { ownerToken: 'wrong' },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'not-owner', revision: 6 });
+    expect(store.getList(list.id)?.revision).toBe(6);
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-missing-item', kind: 'item:delete', actorClientId: 'client-a', payload: { id: 'missing' },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'item-not-found', revision: 6 });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-missing-item-2', kind: 'item:update', actorClientId: 'client-a', payload: { id: 'missing', patch: {} },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'item-not-found', revision: 6 });
+    expect(store.applyOperation('gone-list', {
+      operationId: 'op-gone', kind: 'list:rename', actorClientId: 'client-a', payload: { name: 'Gone' },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'list-not-found', revision: 0 });
+
+    store.close();
+    const reloaded = new Store(file);
+    expect(reloaded.getList(list.id)?.revision).toBe(6);
+    expect(reloaded.applyOperation(list.id, {
+      operationId: 'op-add', kind: 'item:add', actorClientId: 'client-a', payload: { name: 'Again' },
+    })).toMatchObject({ duplicate: true, ack: expect.objectContaining({ itemId, revision: 1 }) });
+    const deletion = reloaded.applyOperation(list.id, {
+      operationId: 'op-owner-delete', kind: 'list:delete', actorClientId: 'client-a', payload: { ownerToken: list.ownerToken },
+    });
+    expect(deletion).toMatchObject({ ack: { status: 'accepted', revision: 7 }, terminal: true, list: null });
+    expect(reloaded.applyOperation(list.id, {
+      operationId: 'op-owner-delete', kind: 'list:delete', actorClientId: 'client-a', payload: { ownerToken: list.ownerToken },
+    })).toMatchObject({ duplicate: true, ack: deletion.ack });
+    reloaded.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it('keeps SQLite canonical across reloads and handles edge input', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-store-'));
     const file = path.join(directory, 'db.sqlite');
@@ -416,6 +496,63 @@ describe('Hono API and realtime server', () => {
     deletedClient.socket.send(JSON.stringify({ t: 'ping' }));
     const closeCode = await new Promise<number>((resolve) => deletedClient.socket.once('close', resolve));
     expect(closeCode).toBe(4004);
+  });
+
+  it('acknowledges identified operations and deduplicates replay', async () => {
+    const created = await (await fetch(`${base}/api/lists`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Identified' }),
+    })).json() as { list: { id: string }; ownerToken: string };
+    const client = await connect(`${wsBase}/ws?list=${created.list.id}&client=identified&name=Guest`);
+    await waitFor(client.messages, (message) => message.t === 'init' && message.list.revision === 0);
+    client.socket.send(JSON.stringify({ t: 'item:add', opId: 'identified-add', tempId: 'tmp-1', item: { name: 'Eggs' } }));
+    const ack = await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-add');
+    expect(ack).toMatchObject({ status: 'accepted', revision: 1, tempItemId: 'tmp-1', item: { name: 'Eggs' } });
+    const state = await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 1);
+    const itemId = state.list.items[0].id;
+    client.socket.send(JSON.stringify({ t: 'item:add', opId: 'identified-add', tempId: 'tmp-1', item: { name: 'Duplicate' } }));
+    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-add')).toEqual(ack);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(client.messages.some((message) => message.t === 'state' && message.list.revision === 2)).toBe(false);
+
+    client.socket.send(JSON.stringify({ t: 'operation', operationId: 'identified-update', kind: 'item:update', payload: {
+      id: itemId, patch: { collected: true },
+    } }));
+    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-update'))
+      .toMatchObject({ status: 'accepted', revision: 2 });
+    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 2);
+    client.socket.send(JSON.stringify({ t: 'list:delete', opId: 'identified-delete', ownerToken: 'wrong' }));
+    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-delete'))
+      .toMatchObject({ status: 'rejected', reason: 'not-owner', reasonCode: 'not-owner', revision: 2 });
+
+    client.socket.send(JSON.stringify({ t: 'operation', opId: 'identified-invalid', kind: 'unknown', payload: {} }));
+    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-invalid'))
+      .toMatchObject({ status: 'rejected', reason: 'invalid-operation', revision: 2 });
+    client.socket.send(JSON.stringify({ t: 'item:add', opId: 'x'.repeat(161), item: { name: 'Too large' } }));
+    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'x'.repeat(161)))
+      .toMatchObject({ status: 'rejected', reason: 'operation-too-large', revision: 2 });
+    client.socket.send(JSON.stringify({ t: 'item:update', opId: 'identified-compact-update', id: itemId, patch: { amount: '1' } }));
+    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-compact-update'))
+      .toMatchObject({ status: 'accepted', revision: 3 });
+    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 3);
+    client.socket.send(JSON.stringify({ t: 'item:delete', opId: 'identified-item-delete', id: itemId }));
+    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-item-delete'))
+      .toMatchObject({ status: 'accepted', revision: 4 });
+    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 4);
+    client.socket.send(JSON.stringify({ t: 'list:clear', opId: 'identified-clear' }));
+    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-clear'))
+      .toMatchObject({ status: 'accepted', revision: 5 });
+    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 5);
+    client.socket.send(JSON.stringify({ t: 'list:rename', opId: 'identified-rename', name: 'Renamed' }));
+    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-rename'))
+      .toMatchObject({ status: 'accepted', revision: 6 });
+    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 6);
+    client.socket.send(JSON.stringify({ t: 'operation', opId: 'identified-generic-add', kind: 'item:add', payload: {
+      item: { name: 'Bread' }, tempItemId: 'temp-generic',
+    } }));
+    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-generic-add'))
+      .toMatchObject({ status: 'accepted', revision: 7, tempItemId: 'temp-generic' });
+    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 7);
+    await close(client.socket);
   });
 
   it('syncs list operations between websocket clients and enforces ownership', async () => {

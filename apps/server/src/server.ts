@@ -8,10 +8,12 @@ import { WebSocketServer } from 'ws';
 import QRCode from 'qrcode';
 import {
   cleanText,
+  rid,
   Store,
-  type ItemPatch,
   type ShoppingItem,
   type ShoppingList,
+  type StoreOperation,
+  type OperationKind,
 } from './store.js';
 import type { WSContext } from 'hono/ws';
 
@@ -91,6 +93,7 @@ function listPayload(list: ShoppingList) {
     id: list.id,
     name: list.name,
     createdAt: list.createdAt,
+    revision: list.revision,
     items: list.items.map(publicItem),
   };
 }
@@ -136,8 +139,60 @@ function pushPresence(rooms: Rooms, listId: string): void {
   broadcast(rooms, listId, { t: 'presence', online: onlineIn(rooms, listId) });
 }
 
+function closeDeletedRoom(rooms: Rooms, listId: string): void {
+  broadcast(rooms, listId, { t: 'closed', reason: 'deleted' });
+  for (const roomSocket of rooms.get(listId)?.keys() || []) {
+    try { roomSocket.close(1000, 'list-deleted'); } catch { /* noop */ }
+  }
+  rooms.delete(listId);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+const OPERATION_KINDS: OperationKind[] = [
+  'item:add', 'item:update', 'item:delete', 'list:clear', 'list:rename', 'list:delete',
+];
+
+/** Convert both the current compact wire format and the generic envelope. */
+function operationFromMessage(message: Record<string, unknown>, clientId: string): StoreOperation | null {
+  const operationId = typeof message.opId === 'string'
+    ? message.opId
+    : typeof message.operationId === 'string' ? message.operationId : '';
+  if (!operationId) return null;
+
+  let kind: OperationKind | undefined;
+  let payload: Record<string, unknown> = {};
+  if (message.t === 'operation') {
+    kind = typeof message.kind === 'string' && OPERATION_KINDS.includes(message.kind as OperationKind)
+      ? message.kind as OperationKind : undefined;
+    payload = isRecord(message.payload) ? message.payload : {};
+    if (kind === 'item:add' && isRecord(payload.item)) {
+      payload = {
+        ...payload.item,
+        tempItemId: payload.tempItemId || payload.tempId,
+      };
+    }
+  } else if (typeof message.t === 'string' && OPERATION_KINDS.includes(message.t as OperationKind)) {
+    kind = message.t as OperationKind;
+    payload = {};
+    if (kind === 'item:add') {
+      payload = isRecord(message.item) ? { ...message.item } : {};
+      if (typeof message.tempId === 'string') payload.tempItemId = message.tempId;
+      if (typeof message.tempItemId === 'string') payload.tempItemId = message.tempItemId;
+    } else if (kind === 'item:update') {
+      payload = { id: message.id, patch: isRecord(message.patch) ? message.patch : {} };
+    } else if (kind === 'item:delete') {
+      payload = { id: message.id };
+    } else if (kind === 'list:rename') {
+      payload = { name: message.name };
+    } else if (kind === 'list:delete') {
+      payload = { ownerToken: message.ownerToken };
+    }
+  }
+  if (!kind) return null;
+  return { operationId, kind, payload, actorClientId: clientId };
 }
 
 export function messageText(data: unknown): string {
@@ -216,7 +271,7 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
     }
     const list = store.createList(body.name);
     return json(c, 201, {
-      list: { id: list.id, name: list.name, createdAt: list.createdAt },
+      list: { id: list.id, name: list.name, createdAt: list.createdAt, revision: list.revision },
       ownerToken: list.ownerToken,
     });
   });
@@ -227,7 +282,7 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
     const list = store.getList(id);
     if (!list) return json(c, 404, { error: 'list not found' });
     return json(c, 200, {
-      list: { id: list.id, name: list.name, createdAt: list.createdAt },
+      list: { id: list.id, name: list.name, createdAt: list.createdAt, revision: list.revision },
       items: list.items.map(publicItem),
       memberCount: store.memberCount(list),
     });
@@ -308,61 +363,51 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
           return;
         }
 
-        switch (message.t) {
-          case 'ping':
-            socket.send(JSON.stringify({ t: 'pong' }));
-            break;
+        if (message.t === 'ping') {
+          socket.send(JSON.stringify({ t: 'pong' }));
+          return;
+        }
 
-          case 'item:add': {
-            const item = store.addItem(current, isRecord(message.item) ? message.item : {}, connection.clientId);
-            if (item) pushState(rooms, current, connection.info);
-            break;
+        const operation = operationFromMessage(message, connection.clientId);
+        if (operation) {
+          const result = store.applyOperation(connection.listId, operation);
+          socket.send(JSON.stringify(result.ack));
+          if (result.duplicate) return;
+          if (result.terminal) {
+            closeDeletedRoom(rooms, connection.listId);
+          } else if (result.ack.status === 'accepted' && result.list) {
+            pushState(rooms, result.list, connection.info);
           }
+          return;
+        }
 
-          case 'item:update': {
-            if (!message.id || !isRecord(message.patch)) break;
-            const patch: ItemPatch = {};
-            if ('name' in message.patch) patch.name = message.patch.name;
-            if ('amount' in message.patch) patch.amount = message.patch.amount;
-            if ('collected' in message.patch) patch.collected = message.patch.collected;
-            if (store.updateItem(current, String(message.id), patch)) pushState(rooms, current, connection.info);
-            break;
-          }
+        if (message.t === 'operation' && (typeof message.opId === 'string' || typeof message.operationId === 'string')) {
+          const opId = typeof message.opId === 'string' ? message.opId : String(message.operationId);
+          socket.send(JSON.stringify({
+            t: 'ack', opId, status: 'rejected', revision: current.revision,
+            reason: 'invalid-operation', reasonCode: 'invalid-operation',
+            message: 'The operation is not supported.',
+          }));
+          return;
+        }
 
-          case 'item:delete':
-            if (message.id && store.deleteItem(current, String(message.id))) pushState(rooms, current, connection.info);
-            break;
-
-          case 'list:clear':
-            store.clearList(current);
-            pushState(rooms, current, connection.info);
-            break;
-
-          case 'list:rename':
-            if (store.renameList(current, message.name)) pushState(rooms, current, connection.info);
-            break;
-
-          case 'list:delete': {
-            if (message.ownerToken !== current.ownerToken) {
-              socket.send(JSON.stringify({ t: 'error', message: 'Only the list owner can delete it.' }));
-              break;
-            }
-            const id = current.id;
-            store.deleteList(id);
-            broadcast(rooms, id, { t: 'closed', reason: 'deleted' });
-            for (const roomSocket of rooms.get(id)?.keys() || []) {
-              try {
-                roomSocket.close(1000, 'list-deleted');
-              } catch {
-                // noop
-              }
-            }
-            rooms.delete(id);
-            break;
-          }
-
-          default:
-            break; // Unknown message types are ignored for forward compatibility.
+        // Old clients did not send operation IDs. Keep accepting those
+        // messages during the protocol migration, but route their mutations
+        // through the same revision-bearing operation path.
+        const legacyKind = typeof message.t === 'string' && OPERATION_KINDS.includes(message.t as OperationKind)
+          ? message.t as OperationKind : undefined;
+        if (!legacyKind) return; // Unknown messages remain forward-compatible.
+        if (legacyKind === 'list:delete' && message.ownerToken !== current.ownerToken) {
+          socket.send(JSON.stringify({ t: 'error', message: 'Only the list owner can delete it.' }));
+          return;
+        }
+        const legacy = operationFromMessage({ ...message, opId: `legacy-${rid(9)}` }, connection.clientId);
+        if (!legacy) return;
+        const result = store.applyOperation(connection.listId, legacy);
+        if (result.terminal) {
+          closeDeletedRoom(rooms, connection.listId);
+        } else if (result.ack.status === 'accepted' && result.list) {
+          pushState(rooms, result.list, connection.info);
         }
       },
 

@@ -90,11 +90,17 @@ pnpm start          # serves the Vite build on port 3000
   WebSockets use Hono's
   `upgradeWebSocket` helper with the same Node server (backed by `ws`), so
   there is no second realtime service.
-- **Sync model** — clients send ops (`item:add`, `item:update`, `item:delete`,
-  `list:clear`, `list:rename`, `list:delete`); the server validates, applies and
-  broadcasts the **full list state** to the room. Last write wins per field.
-  Reconnects re-sync automatically; edits made while offline are queued
-  in-memory and flushed on reconnect.
+- **Sync model** — each active route owns a list session. The session keeps an
+  authoritative revisioned base plus an optimistic, bounded operation outbox,
+  and publishes visible rows through an isolated TanStack DB collection backed
+  by the existing TanStack Query cache. Clients send identified ops (`item:add`,
+  `item:update`, `item:delete`, `list:clear`, `list:rename`, `list:delete`); the
+  SQLite server applies each operation transactionally, persists its original
+  acknowledgement, and broadcasts a revisioned **full list state**. Reconnects
+  replay the same operation IDs sequentially, so lost acknowledgements cannot
+  duplicate an add or repeat a list-wide action. Rejected operations roll back
+  over later pending work; edits made while offline remain in memory and are
+  flushed on reconnect.
 - **Storage** — a SQLite database (`data/db.sqlite`) accessed through Drizzle ORM
   and the `better-sqlite3` adapter. `store.ts` is the application repository, not
   a second database: it owns the Drizzle connection, validates domain operations,
@@ -142,7 +148,7 @@ cannot be represented safely by one compiling project.
 
 ```
 apps/server/src/server.ts         Hono app, REST API, QR endpoint, WebSocket sync
-apps/server/src/store.ts          Drizzle repository/cache + domain operations
+apps/server/src/store.ts          Drizzle repository/cache + idempotent domain operations
 apps/server/src/db/schema.ts       Drizzle SQLite table definitions
 apps/server/tests/smoke.test.ts   Vitest unit, migration, API, and realtime suite
 apps/server/package.json           backend workspace package
@@ -150,7 +156,8 @@ apps/server/tsconfig.json          server-specific TypeScript configuration
 apps/server/tsconfig.test.json     server + test TypeScript configuration
 apps/server/vitest.config.ts       server Vitest environment adapter
 apps/web/index.html                Vite entry document
-apps/web/src/main.tsx              Typed React app, wouter hash routes, realtime list UI
+apps/web/src/main.tsx              Typed React app, wouter hash routes, route rendering
+apps/web/src/lib/list-session.ts   Revisioned list session, outbox, reconciliation, and TanStack DB bridge
 apps/web/src/components/ui/       shadcn-cli generated Base UI components
 apps/web/src/lib/list.ts           Typed list helpers and sorting
 apps/web/src/lib/utils.ts          Tailwind class-name helper

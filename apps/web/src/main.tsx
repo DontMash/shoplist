@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider, useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
+import { useLiveQuery } from '@tanstack/react-db';
 import { registerSW } from 'virtual:pwa-register';
 import interact from 'interactjs';
 import { Link, Route, Router, Switch, useLocation } from 'wouter';
@@ -16,7 +17,8 @@ import {
 } from './components/ui/dialog';
 import { Input } from './components/ui/input';
 import { extractListId, initials, SORT_OPTIONS, SORT_VALUES, sortItems, uid, type ListItem } from './lib/list';
-import { ApiError, createList as createListRequest, fetchList, listQueryKey, responseFromSocket, type ListResponse } from './lib/api';
+import { ApiError, createList as createListRequest, fetchList, listQueryKey, type ListResponse } from './lib/api';
+import { createListSession, getListSessionCollection, type ListSession } from './lib/list-session';
 import { displayNameSchema, inviteSchema, itemEditSchema, itemSchema, listNameSchema, preferencesSchema, promptSchema } from './lib/schemas';
 import {
   IconArrowsSort,
@@ -61,38 +63,6 @@ function FieldError({ field }) {
   const errors = field.state.meta.errors || [];
   if (!errors.length) return null;
   return <span className="form-error" role="alert">{errors.map(error => typeof error === 'string' ? error : error?.message || String(error)).join(', ')}</span>;
-}
-
-type WireMessage = Record<string, any>;
-type MessageHandler = (type: string, message?: any) => void;
-
-class ListConn {
-  listId: string;
-  clientId: string;
-  name: string;
-  emit: MessageHandler;
-  outbox: WireMessage[];
-  attempt: number;
-  closed: boolean;
-  socket: WebSocket | null;
-  timer: ReturnType<typeof setTimeout> | null;
-  status: string;
-
-  constructor(id: string, clientId: string, name: string, emit: MessageHandler) { this.listId = id; this.clientId = clientId; this.name = name; this.emit = emit; this.outbox = []; this.attempt = 0; this.closed = false; this.socket = null; this.timer = null; this.status = 'connecting'; this.connect(); }
-  setStatus(s: string) { if (s !== this.status) { this.status = s; this.emit('status', s); } }
-  connect() {
-    this.setStatus(this.attempt ? 'reconnecting' : 'connecting');
-    let socket; try { socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?list=${encodeURIComponent(this.listId)}&client=${encodeURIComponent(this.clientId)}&name=${encodeURIComponent(this.name || 'Guest')}`); } catch { this.retry(); return; }
-    this.socket = socket;
-    socket.onopen = () => { this.attempt = 0; this.setStatus('live'); this.outbox.splice(0).forEach(m => socket.send(JSON.stringify(m))); };
-    socket.onmessage = (event) => { try { const msg = JSON.parse(event.data); if (msg?.t) this.emit(msg.t, msg); } catch {} };
-    socket.onerror = () => { try { socket.close(); } catch {} };
-    socket.onclose = (event) => { this.socket = null; if (this.closed) return; if (event.code === 4004) { this.setStatus('missing'); this.emit('missing'); } else this.retry(); };
-  }
-  retry() { const delay = Math.min(15000, 700 * 2 ** this.attempt++) + Math.random() * 500; this.setStatus('reconnecting'); clearTimeout(this.timer); this.timer = setTimeout(() => !this.closed && this.connect(), delay); }
-  kick() { if (!this.socket) { clearTimeout(this.timer); this.attempt = 0; this.connect(); } }
-  send(message: WireMessage) { if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message)); else if (message.t !== 'ping') { this.outbox.push(message); if (this.outbox.length > 200) this.outbox.shift(); } }
-  close() { this.closed = true; clearTimeout(this.timer); try { this.socket?.close(); } catch {} this.socket = null; }
 }
 
 type Toast = { id: string; message: string };
@@ -223,7 +193,7 @@ function Join({ id, me, setMe, setLists }) {
   return <div className="center-page"><div className="join-card"><div className="big"><Icon name="cart" /></div><h1>{meta ? `Join “${meta.list.name}”` : 'Join list'}</h1><p className="muted">{error || (query.isPending ? 'Loading…' : meta?.memberCount && meta.memberCount > 0 ? `${meta.memberCount} ${meta.memberCount === 1 ? 'person has' : 'people have'} this list on their device. No account needed — pick a name and jump in.` : 'No account needed — pick a name and jump in.')}</p>{meta && <form className="stack" onSubmit={e => { e.preventDefault(); void joinForm.handleSubmit(); }}><joinForm.Field name="name">{field => <><Input autoFocus={!me.name} value={field.state.value} onChange={e => field.handleChange(e.target.value)} onBlur={field.handleBlur} placeholder="Your name" maxLength={40} aria-label="Your name" aria-invalid={field.state.meta.errors.length > 0} /><FieldError field={field} /></>}</joinForm.Field><Button type="submit" variant="primary">Join list</Button></form>}<Link className="backlink" href="/">Go to my lists</Link></div></div>;
 }
 
-function ItemRow({ item, conn, setList, askDelete }: { item: ListItem; conn: ListConn | null; setList: any; askDelete: (item: ListItem) => void }) {
+function ItemRow({ item, session, askDelete }: { item: ListItem; session: ListSession; askDelete: (item: ListItem) => void }) {
   const [offset, setOffset] = useState(0);
   const [swiping, setSwiping] = useState(false);
   const rowRef = useRef<HTMLLIElement>(null);
@@ -258,7 +228,7 @@ function ItemRow({ item, conn, setList, askDelete }: { item: ListItem; conn: Lis
     }
     if (value !== current) {
       pending.current[field] = value;
-      conn?.send({ t: 'item:update', id: item.id, patch: { [field]: value } });
+      session.updateItem(item.id, { [field]: value });
     } else pending.current[field] = null;
   };
   const schedule = field => {
@@ -271,8 +241,7 @@ function ItemRow({ item, conn, setList, askDelete }: { item: ListItem; conn: Lis
     setSwiping(false);
   };
   const collect = () => {
-    setList(x => ({ ...x, items: x.items.map(i => i.id === item.id ? { ...i, collected: !i.collected } : i) }));
-    conn?.send({ t: 'item:update', id: item.id, patch: { collected: !item.collected } });
+    session.collectItem(item.id, !item.collected);
     resetSwipe();
   };
   const remove = () => {
@@ -320,68 +289,76 @@ function ItemRow({ item, conn, setList, askDelete }: { item: ListItem; conn: Lis
 function ListPage({ id, entry, me, setLists, openDialog, openConfirm, toast }) {
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
-  const queryKey = useMemo(() => listQueryKey(id), [id]);
-  const listQuery = useQuery({ queryKey, queryFn: ({ signal }) => fetchList(id, signal), staleTime: Infinity, retry: false });
-  const list = listQuery.data ? { ...listQuery.data.list, items: listQuery.data.items } : null;
-  const [online, setOnline] = useState([]); const [status, setStatus] = useState('connecting'); const connRef = useRef(null); const addNameRef = useRef<HTMLInputElement>(null);
+  const addNameRef = useRef<HTMLInputElement>(null);
+  const terminalHandled = useRef(false);
+  const outcomeHandled = useRef<string | null>(null);
+  const session = useMemo(() => createListSession({
+    listId: id,
+    clientId: me.clientId,
+    name: me.name,
+    ownerToken: entry?.ownerToken,
+    queryClient,
+  }), [id, me.clientId, me.name, entry?.ownerToken, queryClient]);
+  const sessionState = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
+  // The collection is the reactive item source. Session metadata deliberately
+  // remains outside the collection so revision/status/outcomes stay scalar.
+  const liveItems = useLiveQuery(getListSessionCollection(session) as any);
   const [prefs, setPrefs] = useState(() => { const all = read('sl.listPrefs', {}); const p = all[id] || {}; return { sort: SORT_VALUES.has(p.sort) ? p.sort : 'created-asc', groupCollected: p.groupCollected !== false }; });
+  const collectionItems = (liveItems.data || []) as ListItem[];
+  const list = sessionState.list
+    ? {
+        ...sessionState.list,
+        items: sessionState.items.map((item) => collectionItems.find((candidate) => candidate.id === item.id) || item),
+      }
+    : null;
   const forgetList = useCallback(() => {
-    queryClient.removeQueries({ queryKey });
+    queryClient.removeQueries({ queryKey: listQueryKey(id) });
     setLists(previous => previous.filter(item => item.id !== id));
     const all = read('sl.listPrefs', {});
     delete all[id];
     save('sl.listPrefs', all);
-  }, [id, queryClient, queryKey, setLists]);
-  const applySocketState = useCallback((message) => {
-    // The initial REST query and the websocket handshake can finish in either
-    // order. Cancel the fetch before putting the authoritative full state in
-    // the cache so a slower HTTP response cannot roll realtime data back.
-    void queryClient.cancelQueries({ queryKey }).then(() => {
-      queryClient.setQueryData<ListResponse>(queryKey, previous => responseFromSocket(message, previous));
-    });
-  }, [queryClient, queryKey]);
+  }, [id, queryClient, setLists]);
+  useEffect(() => () => session.close(), [session]);
   useEffect(() => {
-    const connection = new ListConn(id, me.clientId, me.name, (type, msg) => {
-      if (type === 'init' || type === 'state') {
-        applySocketState(msg.list);
-        if (type === 'init') setOnline(msg.online || []);
-        setLists(previous => {
-          const next = previous.map(item => item.id === id && item.name !== msg.list.name ? { ...item, name: msg.list.name } : item);
-          save('sl.lists', next);
-          return next;
-        });
-      } else if (type === 'presence') setOnline(msg.online || []);
-      else if (type === 'status') setStatus(msg);
-      else if (type === 'missing') { toast('This list no longer exists.'); forgetList(); navigate('/'); }
-      else if (type === 'closed' && msg.reason === 'deleted') { toast('This list was deleted by its owner.'); forgetList(); navigate('/'); }
-    });
-    connRef.current = connection;
-    return () => connection.close();
-  }, [id, me.clientId, me.name, applySocketState, setLists, forgetList, navigate, toast]);
-  useEffect(() => { const onlineHandler = () => connRef.current?.kick(); window.addEventListener('online', onlineHandler); return () => window.removeEventListener('online', onlineHandler); }, []);
-  const setList = useCallback((updater) => {
-    queryClient.setQueryData<ListResponse>(queryKey, previous => {
-      if (!previous) return previous;
-      const next = updater({ ...previous.list, items: previous.items });
-      return { ...previous, list: { ...previous.list, name: next.name }, items: next.items };
-    });
-  }, [queryClient, queryKey]);
-  const conn = connRef.current; const items = useMemo(() => sortItems(list?.items || [], prefs), [list, prefs]);
+    const onlineHandler = () => session.kick();
+    window.addEventListener('online', onlineHandler);
+    return () => window.removeEventListener('online', onlineHandler);
+  }, [session]);
+  useEffect(() => {
+    const outcome = sessionState.outcome;
+    if (!outcome || outcome.kind !== 'rejected' || !outcome.operationId || outcomeHandled.current === outcome.operationId) return;
+    outcomeHandled.current = outcome.operationId;
+    toast(outcome.message || 'That change could not be saved.');
+  }, [sessionState.outcome, toast]);
+  useEffect(() => {
+    const outcome = sessionState.outcome;
+    if (!outcome || (outcome.kind !== 'missing' && outcome.kind !== 'deleted') || terminalHandled.current) return;
+    terminalHandled.current = true;
+    toast(outcome.kind === 'missing' ? 'This list no longer exists.' : 'This list was deleted by its owner.');
+    forgetList();
+    navigate('/');
+  }, [sessionState.outcome, forgetList, navigate, toast]);
+  useEffect(() => {
+    if (!sessionState.list) return;
+    setLists(previous => previous.map(item => item.id === id && item.name !== sessionState.list!.name
+      ? { ...item, name: sessionState.list!.name } : item));
+  }, [id, sessionState.list?.name, setLists]);
+  const items = useMemo(() => sortItems(list?.items || [], prefs), [list, prefs]);
   const updatePrefs = p => { const next = { ...prefs, ...p }; setPrefs(next); const all = read('sl.listPrefs', {}); save('sl.listPrefs', { ...all, [id]: next }); };
-  const askDelete = item => openConfirm({ title: 'Delete item?', body: `Delete “${item.name}”? This cannot be undone.`, confirmLabel: 'Delete', danger: true, onConfirm: () => { setList(x => x && ({ ...x, items: x.items.filter(i => i.id !== item.id) })); connRef.current?.send({ t: 'item:delete', id: item.id }); } });
+  const askDelete = item => openConfirm({ title: 'Delete item?', body: `Delete “${item.name}”? This cannot be undone.`, confirmLabel: 'Delete', danger: true, onConfirm: () => { session.deleteItem(item.id); } });
   const addForm = useForm({
     defaultValues: { name: '', amount: '' },
     validators: { onChange: itemSchema, onSubmit: itemSchema },
     onSubmit: ({ value, formApi }) => {
-      connRef.current?.send({ t: 'item:add', item: { name: value.name.trim(), amount: value.amount.trim() } });
+      session.addItem({ name: value.name.trim(), amount: value.amount.trim() });
       formApi.reset();
       requestAnimationFrame(() => addNameRef.current?.focus());
     },
   });
-  const openMenu = () => openDialog({ type: 'menu', title: list?.name, actions: [{ label: 'Done' }], content: <div className="menu-list"><MenuButton icon="share" label="Invite people…" onClick={() => openDialog({ type: 'share', list })} /><MenuButton icon="sort" label="Sort and group items…" onClick={() => openDialog({ type: 'sort', prefs, setPrefs: updatePrefs })} /><MenuButton icon="edit" label="Rename list" onClick={() => openDialog({ type: 'rename', value: list?.name, onConfirm: value => connRef.current?.send({ t: 'list:rename', name: value }) })} /><MenuButton icon="clear" label="Clear list…" danger onClick={() => openConfirm({ title: 'Clear this list?', body: list?.items.length ? `This removes all ${list.items.length} items for everyone in the list. This cannot be undone.` : 'The list is already empty.', confirmLabel: list?.items.length ? 'Clear all items' : 'OK', danger: true, onConfirm: () => list?.items.length && connRef.current?.send({ t: 'list:clear' }) })} />{entry?.ownerToken && <MenuButton icon="trash" label="Delete list…" danger onClick={() => openConfirm({ title: 'Delete list permanently?', body: 'Everyone with access loses this list and all of its items. This cannot be undone.', confirmLabel: 'Delete list', danger: true, onConfirm: () => connRef.current?.send({ t: 'list:delete', ownerToken: entry.ownerToken }) })} />}<MenuButton icon="leave" label="Leave list" danger onClick={() => openConfirm({ title: 'Leave this list?', body: 'It stays available to everyone else, and you can rejoin anytime with the invite link.', confirmLabel: 'Leave', danger: true, onConfirm: () => { forgetList(); navigate('/'); } })} /></div> });
-  if (!list) return <><header className="topbar"><Link href="/" className="icon-btn" aria-label="All lists"><Icon name="back" /></Link><div className="head-title"><h1>{entry.name}</h1></div><span className={`dot ${status === 'live' ? 'live' : status === 'missing' ? 'missing' : 'connecting'}`} /></header><div className="empty">{listQuery.isError ? 'Could not load this list.' : 'Connecting…'}</div></>;
+  const openMenu = () => openDialog({ type: 'menu', title: list?.name, actions: [{ label: 'Done' }], content: <div className="menu-list"><MenuButton icon="share" label="Invite people…" onClick={() => openDialog({ type: 'share', list })} /><MenuButton icon="sort" label="Sort and group items…" onClick={() => openDialog({ type: 'sort', prefs, setPrefs: updatePrefs })} /><MenuButton icon="edit" label="Rename list" onClick={() => openDialog({ type: 'rename', value: list?.name, onConfirm: value => session.renameList(value) })} /><MenuButton icon="clear" label="Clear list…" danger onClick={() => openConfirm({ title: 'Clear this list?', body: list?.items.length ? `This removes all ${list.items.length} items for everyone in the list. This cannot be undone.` : 'The list is already empty.', confirmLabel: list?.items.length ? 'Clear all items' : 'OK', danger: true, onConfirm: () => list?.items.length && session.clearList() })} />{entry?.ownerToken && <MenuButton icon="trash" label="Delete list…" danger onClick={() => openConfirm({ title: 'Delete list permanently?', body: 'Everyone with access loses this list and all of its items. This cannot be undone.', confirmLabel: 'Delete list', danger: true, onConfirm: () => session.deleteList(entry.ownerToken) })} />}<MenuButton icon="leave" label="Leave list" danger onClick={() => openConfirm({ title: 'Leave this list?', body: 'It stays available to everyone else, and you can rejoin anytime with the invite link.', confirmLabel: 'Leave', danger: true, onConfirm: () => { session.close(); forgetList(); navigate('/'); } })} /></div> });
+  if (!list) return <><header className="topbar"><Link href="/" className="icon-btn" aria-label="All lists"><Icon name="back" /></Link><div className="head-title"><h1>{entry.name}</h1></div><span className={`dot ${sessionState.status === 'live' ? 'live' : sessionState.status === 'missing' ? 'missing' : 'connecting'}`} /></header><div className="empty">Connecting…</div></>;
   const done = list.items.filter(i => i.collected).length;
-  return <><header className="topbar"><Link href="/" className="icon-btn" aria-label="All lists"><Icon name="back" /></Link><div className="head-title"><h1>{list.name}</h1><div className="sub"><span>{list.items.length ? `${list.items.length} ${list.items.length === 1 ? 'item' : 'items'} · ${done} collected` : 'Empty'}</span><span className="people">{online.slice(0,4).map(p => <span className="avatar" style={{ '--c': p.color || '#888' } as React.CSSProperties} title={p.name} key={p.clientId}>{initials(p.name)}</span>)}{online.length > 4 && <span className="more">+{online.length-4}</span>}</span></div></div><span className={`dot ${status === 'live' ? 'live' : status === 'missing' ? 'missing' : 'connecting'}`} title={status} /><Button type="button" variant="ghost" size="icon" className="icon-btn" aria-label="List options" onClick={openMenu}><Icon name="dots" /></Button></header><ul className="items">{items.map(item => <ItemRow key={item.id} item={item} conn={conn} setList={setList} askDelete={askDelete} />)}</ul>{!list.items.length && <div className="empty list-empty show"><div className="big"><Icon name="basket" /></div><p>Nothing here yet.</p><p className="muted">Add your first item with the bar below.</p></div>}<form className="addbar" onSubmit={e => { e.preventDefault(); void addForm.handleSubmit(); }}><addForm.Field name="name">{field => <input ref={addNameRef} className="add-name" value={field.state.value} onChange={e => field.handleChange(e.target.value)} onBlur={field.handleBlur} placeholder="Add item…" maxLength={80} autoComplete="off" aria-label="New item name" aria-invalid={field.state.meta.errors.length > 0} />}</addForm.Field><addForm.Field name="amount">{field => <input className="add-amount" value={field.state.value} onChange={e => field.handleChange(e.target.value)} onBlur={field.handleBlur} placeholder="qty" maxLength={40} autoComplete="off" aria-label="New item amount" aria-invalid={field.state.meta.errors.length > 0} />}</addForm.Field><button className="add-btn" type="submit" aria-label="Add item"><Icon name="plus" /></button></form></>;
+  return <><header className="topbar"><Link href="/" className="icon-btn" aria-label="All lists"><Icon name="back" /></Link><div className="head-title"><h1>{list.name}</h1><div className="sub"><span>{list.items.length ? `${list.items.length} ${list.items.length === 1 ? 'item' : 'items'} · ${done} collected` : 'Empty'}</span><span className="people">{sessionState.online.slice(0,4).map(p => <span className="avatar" style={{ '--c': p.color || '#888' } as React.CSSProperties} title={p.name} key={p.clientId}>{initials(p.name)}</span>)}{sessionState.online.length > 4 && <span className="more">+{sessionState.online.length-4}</span>}</span></div></div><span className={`dot ${sessionState.status === 'live' ? 'live' : sessionState.status === 'missing' ? 'missing' : 'connecting'}`} title={`${sessionState.status}${sessionState.pending ? ' · pending changes' : ''}`} /><Button type="button" variant="ghost" size="icon" className="icon-btn" aria-label="List options" onClick={openMenu}><Icon name="dots" /></Button></header><ul className="items">{items.map(item => <ItemRow key={item.id} item={item} session={session} askDelete={askDelete} />)}</ul>{!list.items.length && <div className="empty list-empty show"><div className="big"><Icon name="basket" /></div><p>Nothing here yet.</p><p className="muted">Add your first item with the bar below.</p></div>}<form className="addbar" onSubmit={e => { e.preventDefault(); void addForm.handleSubmit(); }}><addForm.Field name="name">{field => <input ref={addNameRef} className="add-name" value={field.state.value} onChange={e => field.handleChange(e.target.value)} onBlur={field.handleBlur} placeholder="Add item…" maxLength={80} autoComplete="off" aria-label="New item name" aria-invalid={field.state.meta.errors.length > 0} />}</addForm.Field><addForm.Field name="amount">{field => <input className="add-amount" value={field.state.value} onChange={e => field.handleChange(e.target.value)} onBlur={field.handleBlur} placeholder="qty" maxLength={40} autoComplete="off" aria-label="New item amount" aria-invalid={field.state.meta.errors.length > 0} />}</addForm.Field><button className="add-btn" type="submit" aria-label="Add item"><Icon name="plus" /></button></form></>;
 }
 
 function MenuButton({ icon, label, onClick, danger = false }: { icon: string; label: string; onClick: () => void; danger?: boolean }) { return <button type="button" className={`menu-item ${danger ? 'danger' : ''}`} onClick={onClick}><Icon name={icon} /><span>{label}</span></button>; }

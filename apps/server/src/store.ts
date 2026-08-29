@@ -31,8 +31,46 @@ export interface ShoppingList {
   ownerToken: string;
   createdAt: number;
   clearedAt: number | null;
+  /** Monotonically increasing revision of accepted list mutations. */
+  revision: number;
   items: ShoppingItem[];
   members: Record<string, Member>;
+}
+
+export type OperationKind =
+  | 'item:add'
+  | 'item:update'
+  | 'item:delete'
+  | 'list:clear'
+  | 'list:rename'
+  | 'list:delete';
+
+export interface StoreOperation {
+  operationId: string;
+  kind: OperationKind;
+  payload: Record<string, unknown>;
+  actorClientId: string | null;
+}
+
+export interface OperationAck {
+  t: 'ack';
+  opId: string;
+  status: 'accepted' | 'rejected';
+  revision: number;
+  reason?: string;
+  reasonCode?: string;
+  message?: string;
+  item?: ShoppingItem;
+  tempItemId?: string;
+  itemId?: string;
+  idMap?: { tempId: string; itemId: string };
+}
+
+export interface OperationResult {
+  ack: OperationAck;
+  list: ShoppingList | null;
+  duplicate: boolean;
+  terminal: boolean;
 }
 
 /**
@@ -94,7 +132,19 @@ export class Store {
     this.initializeSchema();
 
     if (legacy) this.importLegacy(legacy);
+    this.cleanupProcessedOperations();
     this.load();
+  }
+
+  /**
+   * Operation outcomes are retained indefinitely. A list session can remain
+   * open across an arbitrarily long outage, including after a list deletion,
+   * so time-based pruning would make a replay unsafe. The processed table is
+   * intentionally the durable replay window; a future bounded policy must be
+   * paired with a maximum live-session lifetime.
+   */
+  private cleanupProcessedOperations(): void {
+    // Deliberately empty: indefinite retention is the current replay policy.
   }
 
   /** Reload the in-memory compatibility view from the Drizzle tables. */
@@ -138,6 +188,7 @@ export class Store {
         ownerToken: row.ownerToken,
         createdAt: row.createdAt,
         clearedAt: row.clearedAt ?? null,
+        revision: row.revision ?? 0,
         items: itemsByList.get(row.id) || [],
         members: membersByList.get(row.id) || {},
       };
@@ -176,6 +227,7 @@ export class Store {
       ownerToken: rid(12),
       createdAt: now,
       clearedAt: null,
+      revision: 0,
       items: [],
       members: {},
     };
@@ -324,6 +376,226 @@ export class Store {
     return true;
   }
 
+  // ------------------------------------------------------------- operation stream
+
+  /**
+   * Apply one idempotent websocket operation. The list mutation, revision, and
+   * original acknowledgement are committed in one SQLite transaction.
+   */
+  public applyOperation(listId: string, operation: StoreOperation): OperationResult {
+    const current = this.getList(listId);
+    if (!operation.operationId || operation.operationId.length > 160) {
+      const ack = rejected(operation, current?.revision ?? 0, 'operation-too-large', 'The operation ID is invalid.');
+      return { ack, list: current, duplicate: false, terminal: false };
+    }
+    const stored = this.db.select().from(schema.processedOperations)
+      .where(and(
+        eq(schema.processedOperations.listId, listId),
+        eq(schema.processedOperations.operationId, operation.operationId),
+      )).get();
+    if (stored) {
+      return {
+        ack: JSON.parse(stored.responseJson) as OperationAck,
+        list: this.getList(listId),
+        duplicate: true,
+        terminal: Boolean(stored.terminal),
+      };
+    }
+
+    const now = Date.now();
+    const result = this.db.transaction((tx) => {
+      const list = current;
+      const revision = list?.revision ?? 0;
+      let ack: OperationAck;
+      let terminal = false;
+      let accepted = false;
+      let changedItem: ShoppingItem | null = null;
+      let deletedItemId: string | null = null;
+      let clearAt: number | null = null;
+      let renamedTo: string | null = null;
+
+      if (!list) {
+        ack = {
+          t: 'ack', opId: operation.operationId, status: 'rejected',
+          revision, reason: 'list-not-found', reasonCode: 'list-not-found',
+          message: 'The list no longer exists.',
+        };
+      } else {
+        switch (operation.kind) {
+          case 'item:add': {
+            const itemPayload = isRecordValue(operation.payload.item) ? operation.payload.item : operation.payload;
+            const name = cleanText(itemPayload.name, 80);
+            if (!name) {
+              ack = rejected(operation, revision, 'name-required', 'An item needs a name.');
+              break;
+            }
+            const item: ShoppingItem = {
+              id: rid(8),
+              name,
+              amount: cleanText(itemPayload.amount, 40),
+              collected: false,
+              createdAt: now,
+              updatedAt: now,
+              by: operation.actorClientId || null,
+            };
+            const nextRevision = revision + 1;
+            tx.insert(schema.items).values({
+              id: item.id, listId, name: item.name, amount: item.amount,
+              collected: item.collected, createdAt: item.createdAt,
+              updatedAt: item.updatedAt, by: item.by,
+            }).run();
+            ack = {
+              t: 'ack', opId: operation.operationId, status: 'accepted',
+              revision: nextRevision, item, itemId: item.id,
+              tempItemId: stringValue(itemPayload.tempItemId) || stringValue(itemPayload.tempId),
+              idMap: stringValue(itemPayload.tempItemId) || stringValue(itemPayload.tempId)
+                ? { tempId: (stringValue(itemPayload.tempItemId) || stringValue(itemPayload.tempId)) as string, itemId: item.id }
+                : undefined,
+            };
+            accepted = true;
+            changedItem = item;
+            break;
+          }
+
+          case 'item:update': {
+            const itemId = stringValue(operation.payload.id);
+            const item = itemId ? list.items.find((candidate) => candidate.id === itemId) : undefined;
+            const patchValue = operation.payload.patch;
+            if (!item || !isRecordValue(patchValue)) {
+              ack = rejected(operation, revision, 'item-not-found', 'The item no longer exists.');
+              break;
+            }
+            const patch: ItemPatch = {};
+            if ('name' in patchValue) patch.name = patchValue.name;
+            if ('amount' in patchValue) patch.amount = patchValue.amount;
+            if ('collected' in patchValue) patch.collected = patchValue.collected;
+            const values: Partial<typeof schema.items.$inferInsert> = { updatedAt: now };
+            if (patch.name !== undefined) {
+              const clean = cleanText(patch.name, 80);
+              if (!clean) {
+                ack = rejected(operation, revision, 'name-required', 'An item needs a name.');
+                break;
+              }
+              values.name = clean;
+            }
+            if (patch.amount !== undefined) values.amount = cleanText(patch.amount, 40);
+            if (patch.collected !== undefined) values.collected = Boolean(patch.collected);
+            if (Object.keys(values).length === 1) {
+              ack = rejected(operation, revision, 'invalid-payload', 'No item fields were supplied.');
+              break;
+            }
+            tx.update(schema.items).set(values)
+              .where(and(eq(schema.items.id, item.id), eq(schema.items.listId, listId))).run();
+            changedItem = { ...item };
+            if (values.name !== undefined) changedItem.name = values.name;
+            if (values.amount !== undefined) changedItem.amount = values.amount;
+            if (values.collected !== undefined) changedItem.collected = values.collected;
+            changedItem.updatedAt = now;
+            ack = {
+              t: 'ack', opId: operation.operationId, status: 'accepted',
+              revision: revision + 1, itemId: item.id,
+            };
+            accepted = true;
+            break;
+          }
+
+          case 'item:delete': {
+            const itemId = stringValue(operation.payload.id);
+            const item = itemId ? list.items.find((candidate) => candidate.id === itemId) : undefined;
+            if (!item) {
+              ack = rejected(operation, revision, 'item-not-found', 'The item no longer exists.');
+              break;
+            }
+            tx.delete(schema.items).where(and(eq(schema.items.id, item.id), eq(schema.items.listId, listId))).run();
+            ack = {
+              t: 'ack', opId: operation.operationId, status: 'accepted', revision: revision + 1,
+              itemId: item.id,
+            };
+            accepted = true;
+            deletedItemId = item.id;
+            break;
+          }
+
+          case 'list:clear':
+            clearAt = now;
+            tx.delete(schema.items).where(eq(schema.items.listId, listId)).run();
+            tx.update(schema.lists).set({ clearedAt: clearAt, revision: revision + 1 })
+              .where(eq(schema.lists.id, listId)).run();
+            ack = { t: 'ack', opId: operation.operationId, status: 'accepted', revision: revision + 1 };
+            accepted = true;
+            break;
+
+          case 'list:rename': {
+            const name = cleanText(operation.payload.name, 60);
+            if (!name) {
+              ack = rejected(operation, revision, 'name-required', 'Give the list a name.');
+              break;
+            }
+            tx.update(schema.lists).set({ name, revision: revision + 1 })
+              .where(eq(schema.lists.id, listId)).run();
+            ack = { t: 'ack', opId: operation.operationId, status: 'accepted', revision: revision + 1 };
+            accepted = true;
+            renamedTo = name;
+            break;
+          }
+
+          case 'list:delete':
+            if (stringValue(operation.payload.ownerToken) !== list.ownerToken) {
+              ack = rejected(operation, revision, 'not-owner', 'Only the list owner can delete it.');
+              break;
+            }
+            // The outcome is intentionally not foreign-keyed to lists. It must
+            // remain replayable after the list row and its children disappear.
+            ack = { t: 'ack', opId: operation.operationId, status: 'accepted', revision: revision + 1 };
+            tx.delete(schema.lists).where(eq(schema.lists.id, listId)).run();
+            accepted = true;
+            terminal = true;
+            break;
+        }
+      }
+
+      if (list && accepted && operation.kind !== 'list:clear' && operation.kind !== 'list:rename' && operation.kind !== 'list:delete') {
+        tx.update(schema.lists).set({ revision: revision + 1 }).where(eq(schema.lists.id, listId)).run();
+      }
+      tx.insert(schema.processedOperations).values({
+        listId,
+        operationId: operation.operationId,
+        status: ack.status,
+        revision: ack.revision,
+        responseJson: JSON.stringify(ack),
+        terminal,
+        processedAt: now,
+      }).run();
+      return { ack, accepted, terminal, changedItem, deletedItemId, clearAt, renamedTo };
+    });
+
+    // Only update the compatibility projection after the transaction commits.
+    if (current && result.accepted) {
+      if (operation.kind === 'list:delete') {
+        delete this.data.lists[listId];
+      } else {
+        current.revision = result.ack.revision;
+        if (result.changedItem) {
+          const index = current.items.findIndex((item) => item.id === result.changedItem!.id);
+          if (index === -1) current.items.push(result.changedItem);
+          else current.items[index] = result.changedItem;
+        }
+        if (result.deletedItemId) current.items = current.items.filter((item) => item.id !== result.deletedItemId);
+        if (result.clearAt !== null) {
+          current.items = [];
+          current.clearedAt = result.clearAt;
+        }
+        if (result.renamedTo !== null) current.name = result.renamedTo;
+      }
+    }
+    return {
+      ack: result.ack,
+      list: this.getList(listId),
+      duplicate: false,
+      terminal: result.terminal,
+    };
+  }
+
   // ------------------------------------------------------------- setup/migration
 
   private initializeSchema(): void {
@@ -336,7 +608,8 @@ export class Store {
         name TEXT NOT NULL,
         owner_token TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        cleared_at INTEGER
+        cleared_at INTEGER,
+        revision INTEGER NOT NULL DEFAULT 0
       )`,
       `CREATE TABLE IF NOT EXISTS items (
         id TEXT PRIMARY KEY NOT NULL,
@@ -357,8 +630,30 @@ export class Store {
         joined_at INTEGER NOT NULL,
         PRIMARY KEY (list_id, client_id)
       )`,
+      `CREATE TABLE IF NOT EXISTS processed_operations (
+        list_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('accepted', 'rejected')),
+        revision INTEGER NOT NULL,
+        response_json TEXT NOT NULL,
+        terminal INTEGER NOT NULL DEFAULT 0,
+        processed_at INTEGER NOT NULL,
+        PRIMARY KEY (list_id, operation_id)
+      )`,
+      'CREATE INDEX IF NOT EXISTS processed_operations_processed_at_idx ON processed_operations(processed_at)',
     ];
     for (const statement of statements) this.db.run(statement);
+
+    // CREATE TABLE IF NOT EXISTS does not migrate installations created by an
+    // older release. Existing lists begin at revision zero.
+    const columns = this.sqlite.prepare('PRAGMA table_info(lists)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'revision')) {
+      this.sqlite.exec('ALTER TABLE lists ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+    }
+    const processedColumns = this.sqlite.prepare('PRAGMA table_info(processed_operations)').all() as Array<{ name: string }>;
+    if (!processedColumns.some((column) => column.name === 'terminal')) {
+      this.sqlite.exec('ALTER TABLE processed_operations ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0');
+    }
   }
 
   private importLegacy(legacy: StoreSnapshot): void {
@@ -373,6 +668,7 @@ export class Store {
           ownerToken: cleanText(raw.ownerToken, 120) || rid(12),
           createdAt: numberOr(raw.createdAt, Date.now()),
           clearedAt: raw.clearedAt == null ? null : numberOr(raw.clearedAt, Date.now()),
+          revision: 0,
           items: [],
           members: {},
         };
@@ -451,6 +747,21 @@ export class Store {
     }
     return null;
   }
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function rejected(operation: StoreOperation, revision: number, reason: string, message: string): OperationAck {
+  return {
+    t: 'ack', opId: operation.operationId, status: 'rejected', revision,
+    reason, reasonCode: reason, message,
+  };
 }
 
 function numberOr(value: unknown, fallback: number): number {
