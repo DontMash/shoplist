@@ -2,8 +2,12 @@
 FROM node:24-alpine AS build
 WORKDIR /app
 
+# better-sqlite3 falls back to node-gyp on Alpine, so provide the native
+# addon build toolchain in this disposable stage.
+RUN apk add --no-cache python3 make g++
+
 RUN corepack enable
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json vitest.config.ts ./
 COPY apps/web/package.json apps/web/package.json
 COPY apps/server/package.json apps/server/package.json
 RUN pnpm install --frozen-lockfile

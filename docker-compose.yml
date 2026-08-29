@@ -3,8 +3,6 @@ services:
     build: .
     image: shoplist:latest
     container_name: shoplist
-    ports:
-      - "3000:3000"
     environment:
       - PORT=3000
     volumes:
