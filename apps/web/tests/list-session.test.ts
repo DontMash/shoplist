@@ -192,6 +192,79 @@ describe('list session', () => {
     expect(session.getSnapshot().items).toEqual([expect.objectContaining({ id: 'canonical', name: 'Eggs, free range' })]);
   });
 
+  it('does not enqueue a clear operation for an already empty list', async () => {
+    const transport = new InMemoryListSessionTransport(snapshot([]));
+    const session = await sessionFor(transport);
+
+    expect(session.clearList()).toBeNull();
+    expect(transport.sent).toHaveLength(0);
+    expect(session.getSnapshot().pending).toBe(false);
+  });
+
+  it('ignores malformed acknowledgements and snapshots without changing visible state', async () => {
+    const transport = new InMemoryListSessionTransport(snapshot());
+    const session = await sessionFor(transport);
+    const before = session.getSnapshot();
+
+    transport.deliver({ t: 'state', list: { id: 'list', name: 'Bad', createdAt: 1, revision: 2, items: [null] } });
+    expect(session.getSnapshot()).toMatchObject({ revision: before.revision, items: before.items });
+
+    const operationId = session.collectItem('item-1')!;
+    transport.deliver({ t: 'ack', opId: operationId, status: 'not-a-status', revision: 1 });
+    transport.deliver({ t: 'ack', opId: operationId, status: 'accepted' });
+    transport.deliver({ t: 'ack', opId: operationId, status: 'accepted', revision: 1, item: null });
+    transport.deliver({ t: 'ack', opId: operationId, status: 'accepted', revision: 1, itemId: 42 });
+    transport.deliver({ t: 'ack', opId: operationId, status: 'accepted', revision: 1, idMap: { tempId: 'tmp' } });
+    expect(session.getSnapshot()).toMatchObject({ pending: true, items: [expect.objectContaining({ id: 'item-1', collected: true })] });
+  });
+
+  it('drops dependent operations when a full outbox rejects an optimistic add', async () => {
+    const transport = new InMemoryListSessionTransport(snapshot([]));
+    transport.autoOpen = false;
+    const session = await sessionFor(transport, { autoStart: false, initialSnapshot: snapshot([]), maxPending: 1 });
+
+    const temporaryId = session.addItem({ name: 'New item' });
+    session.updateItem(temporaryId, { amount: '1' });
+    session.addItem({ name: 'Second item' });
+
+    expect(session.getSnapshot().pendingCount).toBe(1);
+    expect(session.getSnapshot().items).toEqual([expect.objectContaining({ name: 'Second item' })]);
+    expect(session.getLatestOutcome()).toMatchObject({ reason: 'outbox-full' });
+  });
+
+  it('validates complete snapshots and presence payloads before publishing them', async () => {
+    const transport = new InMemoryListSessionTransport(snapshot());
+    const session = await sessionFor(transport);
+
+    transport.deliver({ t: 'init', list: { id: 'list', name: 'Minimal', createdAt: 1, revision: 1, items: [{ id: 'minimal', name: 'Minimal' }] }, online: [{ clientId: 'client-b', name: 'Bob', color: '#123' }] });
+    expect(session.getSnapshot()).toMatchObject({ revision: 1, items: [{ id: 'minimal', amount: '', collected: false }], online: [{ clientId: 'client-b' }] });
+    transport.deliver({ t: 'presence', online: 'not an array' });
+    expect(session.getSnapshot().online).toHaveLength(1);
+
+    transport.deliver({ t: 'state', list: { id: 'list', name: 'Rich', createdAt: 2, revision: 2, items: [{ id: 'rich', name: 'Rich', amount: '1', collected: true, createdAt: 2, updatedAt: 3, by: 'client-b' }] } });
+    expect(session.getSnapshot().items[0]).toMatchObject({ id: 'rich', by: 'client-b' });
+    transport.deliver({ t: 'presence', online: [null] });
+    expect(session.getSnapshot().online).toHaveLength(1);
+
+    const invalidItems = [
+      null, { id: 1, name: 'bad' }, { id: 'bad', name: 1 },
+      { id: 'bad', name: 'bad', amount: 1 }, { id: 'bad', name: 'bad', collected: 1 },
+      { id: 'bad', name: 'bad', createdAt: 'bad' }, { id: 'bad', name: 'bad', updatedAt: 'bad' },
+      { id: 'bad', name: 'bad', by: 1 },
+    ];
+    invalidItems.forEach((invalid, index) => transport.deliver({
+      t: 'state', list: { id: 'list', name: 'Bad', createdAt: 1, revision: 3 + index, items: [invalid] },
+    }));
+    [
+      { id: 'other', name: 'Bad', createdAt: 1, revision: 20, items: [] },
+      { id: 'list', name: 'Bad', createdAt: 'bad', revision: 20, items: [] },
+      { id: 'list', name: 'Bad', createdAt: 1, revision: 'bad', items: [] },
+      { id: 'list', name: 'Bad', createdAt: 1, revision: 1.5, items: [] },
+      { id: 'list', name: 'Bad', createdAt: 1, revision: -1, items: [] },
+    ].forEach((list) => transport.deliver({ t: 'state', list }));
+    expect(session.getSnapshot()).toMatchObject({ revision: 2, items: [{ id: 'rich' }] });
+  });
+
   it('handles all list commands and terminal outcomes through the public interface', async () => {
     const transport = new InMemoryListSessionTransport(snapshot());
     const session = await sessionFor(transport);

@@ -69,6 +69,16 @@ describe('Store', () => {
     expect(store.applyOperation(list.id, {
       operationId: 'op-empty-patch', kind: 'item:update', actorClientId: 'client-a', payload: { id: itemId, patch: {} },
     }).ack).toMatchObject({ status: 'rejected', reason: 'invalid-payload', revision: 2 });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-bad-add-amount', kind: 'item:add', actorClientId: 'client-a', payload: { name: 'Bad', amount: 2 },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'invalid-payload', revision: 2 });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-bad-update-type', kind: 'item:update', actorClientId: 'client-a',
+      payload: { id: itemId, patch: { collected: 'false' } },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'invalid-payload', revision: 2 });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-bad-rename-type', kind: 'list:rename', actorClientId: 'client-a', payload: { name: 42 },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'invalid-payload', revision: 2 });
 
     const second = store.applyOperation(list.id, {
       operationId: 'op-second', kind: 'item:add', actorClientId: null,
@@ -100,6 +110,25 @@ describe('Store', () => {
     expect(store.applyOperation('gone-list', {
       operationId: 'op-gone', kind: 'list:rename', actorClientId: 'client-a', payload: { name: 'Gone' },
     }).ack).toMatchObject({ status: 'rejected', reason: 'list-not-found', revision: 0 });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-invalid-kind', kind: 'unsupported' as any, actorClientId: 'client-a', payload: {},
+    }).ack).toMatchObject({ status: 'rejected', reason: 'invalid-operation', revision: 6 });
+    expect(store.applyOperation(list.id, {
+      operationId: '', kind: 'list:clear', actorClientId: 'client-a', payload: {},
+    }).ack).toMatchObject({ status: 'rejected', reason: 'operation-too-large', revision: 6 });
+    expect(store.applyOperation(list.id, {
+      operationId: null as any, kind: 'list:clear', actorClientId: 'client-a', payload: {},
+    }).ack).toMatchObject({ status: 'rejected', reason: 'operation-too-large', revision: 6 });
+    const oversizedOperation = store.applyOperation(list.id, {
+      operationId: 'x'.repeat(161), kind: 'list:clear', actorClientId: 'client-a', payload: {},
+    });
+    expect(oversizedOperation.ack).toMatchObject({ status: 'rejected', reason: 'operation-too-large' });
+    expect(store.applyOperation(list.id, {
+      operationId: 'x'.repeat(161), kind: 'list:rename', actorClientId: 'client-a', payload: { name: 'ignored' },
+    })).toMatchObject({ duplicate: true, ack: oversizedOperation.ack });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-invalid-kind', kind: 'list:clear', actorClientId: 'client-a', payload: {},
+    })).toMatchObject({ duplicate: true, ack: expect.objectContaining({ reason: 'invalid-operation' }) });
 
     store.close();
     const reloaded = new Store(file);
@@ -181,16 +210,19 @@ describe('Store', () => {
       lists: {
         nullList: null,
         primitiveList: 'not a list',
+        arrayList: [],
         fallback: {
           name: null, ownerToken: null, createdAt: 'bad', clearedAt: 'bad',
-          items: [null, 'bad item', {}, { id: 42, name: ' Valid ', amount: 42, collected: 1, by: '' }],
+          items: [null, 'bad item', [], {}, { id: 42, name: ' Valid ', amount: 42, collected: 1, by: '' }],
           members: {
             '': { clientId: '', name: 'ignored', color: '#000', joinedAt: 1 },
             empty: null,
             primitive: 'bad member',
+            array: [],
             fallback: { clientId: '', name: ' ', color: '', joinedAt: 'bad' },
           },
         },
+        'bad/key': { id: 'bad/id', name: 'Generated ID', items: [], members: {} },
       },
     }));
     const store = new Store(file);
@@ -201,6 +233,8 @@ describe('Store', () => {
     expect(list?.members).toEqual({
       fallback: expect.objectContaining({ name: 'Guest', color: '#888888' }),
     });
+    expect(store.listCount()).toBe(2);
+    expect(store.getList('bad/key')).toBeNull();
     store.close();
     await rm(directory, { recursive: true, force: true });
   });
@@ -268,6 +302,7 @@ describe('server helpers', () => {
     expect(sameOrigin(request)).toBe(true);
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'http://example.test' } }))).toBe(true);
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'https://evil.example' } }))).toBe(false);
+    expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'https://example.test' } }))).toBe(false);
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'not-a-url' } }))).toBe(false);
 
     const first = { clientId: 'same', name: 'First', color: colorFor('same') };
@@ -378,6 +413,8 @@ describe('Hono API and realtime server', () => {
     expect(await shell.text()).toContain('<title>Shoplist</title>');
     expect((await fetch(`${base}/..%2f..%2fserver.js`)).status).toBeGreaterThanOrEqual(400);
     expect((await fetch(`${base}/api/lists`, { method: 'PUT' })).status).toBe(405);
+    expect((await fetch(`${base}/api/lists`, { method: 'GET' })).status).toBe(405);
+    expect((await fetch(`${base}/api/unknown`, { method: 'GET' })).status).toBe(405);
     expect((await fetch(`${base}/api/lists`, { method: 'POST', headers: { origin: 'https://evil.example' } })).status).toBe(403);
     expect((await fetch(`${base}/api/lists`, { method: 'POST' })).status).toBe(415);
     expect((await fetch(`${base}/api/lists`, {

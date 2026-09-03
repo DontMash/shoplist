@@ -45,6 +45,11 @@ export type OperationKind =
   | 'list:rename'
   | 'list:delete';
 
+const OPERATION_KINDS: OperationKind[] = [
+  'item:add', 'item:update', 'item:delete', 'list:clear', 'list:rename', 'list:delete',
+];
+const LIST_ID = /^[A-Za-z0-9_-]{4,40}$/;
+
 export interface StoreOperation {
   operationId: string;
   kind: OperationKind;
@@ -384,22 +389,51 @@ export class Store {
    */
   public applyOperation(listId: string, operation: StoreOperation): OperationResult {
     const current = this.getList(listId);
-    if (!operation.operationId || operation.operationId.length > 160) {
-      const ack = rejected(operation, current?.revision ?? 0, 'operation-too-large', 'The operation ID is invalid.');
+    const operationId = typeof operation.operationId === 'string' ? operation.operationId : '';
+    if (operationId) {
+      const stored = this.db.select().from(schema.processedOperations)
+        .where(and(
+          eq(schema.processedOperations.listId, listId),
+          eq(schema.processedOperations.operationId, operationId),
+        )).get();
+      if (stored) {
+        return {
+          ack: JSON.parse(stored.responseJson) as OperationAck,
+          list: this.getList(listId),
+          duplicate: true,
+          terminal: Boolean(stored.terminal),
+        };
+      }
+    }
+    if (!operationId || operationId.length > 160) {
+      const safeOperation = { ...operation, operationId } as StoreOperation;
+      const ack = rejected(safeOperation, current?.revision ?? 0, 'operation-too-large', 'The operation ID is invalid.');
+      if (operationId) {
+        this.db.insert(schema.processedOperations).values({
+          listId,
+          operationId,
+          status: ack.status,
+          revision: ack.revision,
+          responseJson: JSON.stringify(ack),
+          terminal: false,
+          processedAt: Date.now(),
+        }).run();
+      }
       return { ack, list: current, duplicate: false, terminal: false };
     }
-    const stored = this.db.select().from(schema.processedOperations)
-      .where(and(
-        eq(schema.processedOperations.listId, listId),
-        eq(schema.processedOperations.operationId, operation.operationId),
-      )).get();
-    if (stored) {
-      return {
-        ack: JSON.parse(stored.responseJson) as OperationAck,
-        list: this.getList(listId),
-        duplicate: true,
-        terminal: Boolean(stored.terminal),
-      };
+
+    if (!OPERATION_KINDS.includes(operation.kind) || !isRecordValue(operation.payload)) {
+      const ack = rejected(operation, current?.revision ?? 0, 'invalid-operation', 'The operation is not supported.');
+      this.db.insert(schema.processedOperations).values({
+        listId,
+        operationId: operation.operationId,
+        status: ack.status,
+        revision: ack.revision,
+        responseJson: JSON.stringify(ack),
+        terminal: false,
+        processedAt: Date.now(),
+      }).run();
+      return { ack, list: current, duplicate: false, terminal: false };
     }
 
     const now = Date.now();
@@ -424,6 +458,14 @@ export class Store {
         switch (operation.kind) {
           case 'item:add': {
             const itemPayload = isRecordValue(operation.payload.item) ? operation.payload.item : operation.payload;
+            if (itemPayload.name !== undefined && typeof itemPayload.name !== 'string') {
+              ack = rejected(operation, revision, 'invalid-payload', 'The item name is invalid.');
+              break;
+            }
+            if (itemPayload.amount !== undefined && typeof itemPayload.amount !== 'string') {
+              ack = rejected(operation, revision, 'invalid-payload', 'The item amount is invalid.');
+              break;
+            }
             const name = cleanText(itemPayload.name, 80);
             if (!name) {
               ack = rejected(operation, revision, 'name-required', 'An item needs a name.');
@@ -469,6 +511,18 @@ export class Store {
             if ('name' in patchValue) patch.name = patchValue.name;
             if ('amount' in patchValue) patch.amount = patchValue.amount;
             if ('collected' in patchValue) patch.collected = patchValue.collected;
+            if (patch.name !== undefined && typeof patch.name !== 'string') {
+              ack = rejected(operation, revision, 'invalid-payload', 'The item name is invalid.');
+              break;
+            }
+            if (patch.amount !== undefined && typeof patch.amount !== 'string') {
+              ack = rejected(operation, revision, 'invalid-payload', 'The item amount is invalid.');
+              break;
+            }
+            if (patch.collected !== undefined && typeof patch.collected !== 'boolean') {
+              ack = rejected(operation, revision, 'invalid-payload', 'The collected state is invalid.');
+              break;
+            }
             const values: Partial<typeof schema.items.$inferInsert> = { updatedAt: now };
             if (patch.name !== undefined) {
               const clean = cleanText(patch.name, 80);
@@ -526,6 +580,10 @@ export class Store {
             break;
 
           case 'list:rename': {
+            if (operation.payload.name !== undefined && typeof operation.payload.name !== 'string') {
+              ack = rejected(operation, revision, 'invalid-payload', 'The list name is invalid.');
+              break;
+            }
             const name = cleanText(operation.payload.name, 60);
             if (!name) {
               ack = rejected(operation, revision, 'name-required', 'Give the list a name.');
@@ -659,9 +717,11 @@ export class Store {
   private importLegacy(legacy: StoreSnapshot): void {
     this.db.transaction((tx) => {
       for (const [key, source] of Object.entries(legacy.lists || {})) {
-        if (!source || typeof source !== 'object') continue;
+        if (!isRecordValue(source)) continue;
         const raw = source as Partial<ShoppingList>;
-        const id = cleanText(raw.id || key, 40) || key;
+        const sourceId = typeof raw.id === 'string' ? cleanText(raw.id, 40) : '';
+        const fallbackId = cleanText(key, 40);
+        const id = LIST_ID.test(sourceId) ? sourceId : LIST_ID.test(fallbackId) ? fallbackId : rid(9);
         const list: ShoppingList = {
           id,
           name: cleanText(raw.name, 60) || 'Shopping list',
@@ -673,16 +733,17 @@ export class Store {
           members: {},
         };
 
-        tx.insert(schema.lists).values({
+        const insertedList = tx.insert(schema.lists).values({
           id: list.id,
           name: list.name,
           ownerToken: list.ownerToken,
           createdAt: list.createdAt,
           clearedAt: list.clearedAt,
         }).onConflictDoNothing().run();
+        if (insertedList.changes === 0) continue;
 
         for (const sourceItem of Array.isArray(raw.items) ? raw.items : []) {
-          if (!sourceItem || typeof sourceItem !== 'object') continue;
+          if (!isRecordValue(sourceItem)) continue;
           const item = sourceItem as Partial<ShoppingItem> & { shopped?: unknown };
           const itemId = cleanText(item.id, 80) || rid(8);
           const itemName = cleanText(item.name, 80);
@@ -694,15 +755,16 @@ export class Store {
             amount: cleanText(item.amount, 40),
             // Legacy `shopped` was a separate status and must not affect
             // collection. Only the old collected flag is retained.
-            collected: Boolean(item.collected),
+            collected: item.collected === true || (item.collected as unknown) === 1,
             createdAt: numberOr(item.createdAt, Date.now()),
             updatedAt: numberOr(item.updatedAt, numberOr(item.createdAt, Date.now())),
             by: typeof item.by === 'string' ? cleanText(item.by, 80) || null : null,
           }).onConflictDoNothing().run();
         }
 
-        for (const [clientId, sourceMember] of Object.entries(raw.members || {})) {
-          if (!sourceMember || typeof sourceMember !== 'object') continue;
+        const sourceMembers = isRecordValue(raw.members) ? raw.members : {};
+        for (const [clientId, sourceMember] of Object.entries(sourceMembers)) {
+          if (!isRecordValue(sourceMember)) continue;
           const member = sourceMember as Partial<Member>;
           const cleanClientId = cleanText(member.clientId || clientId, 80);
           if (!cleanClientId) continue;

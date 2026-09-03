@@ -118,7 +118,10 @@ function Home({ me, setMe, lists, setLists, openPrompt, openConfirm, toast }) {
     if (query?.error instanceof ApiError && query.error.status === 404) return [entry.id, { gone: true }];
     if (query?.isError) return [entry.id, { text: 'Offline — showing saved info' }];
     const items = data?.items || [];
-    return [entry.id, { text: query?.isPending ? '…' : items.length ? `${items.length} ${items.length === 1 ? 'item' : 'items'} · ${items.filter(i => i.collected).length} collected` : 'Empty — add something!' }];
+    const summary = items.length
+      ? `${items.length} ${items.length === 1 ? 'item' : 'items'} · ${items.filter(i => i.collected).length} collected`
+      : 'Empty — add something!';
+    return [entry.id, { text: query?.isPending ? '…' : query?.isError ? `${summary} · Offline — showing saved info` : summary }];
   })), [lists, listQueries]);
   const createMutation = useMutation({ mutationFn: createListRequest });
   const inviteForm = useForm({
@@ -182,7 +185,13 @@ function Join({ id, me, setMe, setLists }) {
       const nextName = value.name.trim();
       setMe(x => ({ ...x, name: nextName }));
       save('sl.name', nextName);
-      setLists(x => x.some(l => l.id === id) ? x : [{ id, name: meta.list.name, ownerToken: null, joinedAt: Date.now() }, ...x]);
+      setLists(previous => {
+        const existing = previous.find(item => item.id === id);
+        return [
+          { id, name: meta.list.name, ownerToken: existing?.ownerToken || null, joinedAt: Date.now() },
+          ...previous.filter(item => item.id !== id),
+        ];
+      });
       queryClient.setQueryData(listQueryKey(id), meta);
       navigate(`/list/${id}`);
     },
@@ -283,7 +292,7 @@ function ItemRow({ item, session, askDelete }: { item: ListItem; session: ListSe
     return () => interactable.unset();
   }, [swipeEnabled]);
 
-  return <li ref={rowRef} className={`item ${item.collected ? 'collected' : ''} ${swiping ? 'swiping' : ''}`} data-id={item.id}><div className="item-swipe"><button type="button" className="swipe-action swipe-collect" onClick={collect}><Icon name="check" /><span>Collect</span></button><button type="button" className="swipe-action swipe-delete" onClick={remove}><Icon name="trash" /><span>Delete</span></button><div className="item-content" style={{ transform: `translateX(${offset}px)` }}><div className="item-row1"><itemForm.Field name="name">{field => <input className="item-name" value={field.state.value} onChange={e => { pending.current.name = e.target.value; field.handleChange(e.target.value); schedule('name'); }} onBlur={() => { field.handleBlur(); clearTimeout(timers.current.nameTimer); commit('name'); }} onKeyDown={e => e.key === 'Enter' && e.preventDefault()} maxLength={80} aria-label="Item name" aria-invalid={field.state.meta.errors.length > 0} />}</itemForm.Field><itemForm.Field name="amount">{field => <input className="item-amount" value={field.state.value} onChange={e => { pending.current.amount = e.target.value; field.handleChange(e.target.value); schedule('amount'); }} onBlur={() => { field.handleBlur(); clearTimeout(timers.current.amountTimer); commit('amount'); }} maxLength={40} placeholder="qty" aria-label="Amount" aria-invalid={field.state.meta.errors.length > 0} />}</itemForm.Field></div><div className="item-row2"><button type="button" className="chip chip-collected" aria-pressed={!!item.collected} onClick={collect}><Icon name="check" /><span>Collected</span></button><span className="spacer" /><Button type="button" variant="ghost" size="icon" className="icon-btn item-del" aria-label="Delete item" onClick={remove}><Icon name="trash" /></Button></div></div></div></li>;
+  return <li ref={rowRef} className={`item ${item.collected ? 'collected' : ''} ${swiping ? 'swiping' : ''}`} data-id={item.id}><div className="item-swipe"><button type="button" className="swipe-action swipe-collect" onClick={collect}><Icon name="check" /><span>Collect</span></button><button type="button" className="swipe-action swipe-delete" onClick={remove}><Icon name="trash" /><span>Delete</span></button><div className="item-content" style={{ transform: `translateX(${offset}px)` }}><div className="item-row1"><itemForm.Field name="name">{field => <div className="field-control item-field item-name-field"><input className="item-name" value={field.state.value} onChange={e => { pending.current.name = e.target.value; field.handleChange(e.target.value); schedule('name'); }} onBlur={() => { field.handleBlur(); clearTimeout(timers.current.nameTimer); commit('name'); }} onKeyDown={e => e.key === 'Enter' && e.preventDefault()} maxLength={80} aria-label="Item name" aria-invalid={field.state.meta.errors.length > 0} /><FieldError field={field} /></div>}</itemForm.Field><itemForm.Field name="amount">{field => <div className="field-control item-field item-amount-field"><input className="item-amount" value={field.state.value} onChange={e => { pending.current.amount = e.target.value; field.handleChange(e.target.value); schedule('amount'); }} onBlur={() => { field.handleBlur(); clearTimeout(timers.current.amountTimer); commit('amount'); }} maxLength={40} placeholder="qty" aria-label="Amount" aria-invalid={field.state.meta.errors.length > 0} /><FieldError field={field} /></div>}</itemForm.Field></div><div className="item-row2"><button type="button" className="chip chip-collected" aria-pressed={!!item.collected} onClick={collect}><Icon name="check" /><span>Collected</span></button><span className="spacer" /><Button type="button" variant="ghost" size="icon" className="icon-btn item-del" aria-label="Delete item" onClick={remove}><Icon name="trash" /></Button></div></div></div></li>;
 }
 
 function ListPage({ id, entry, me, setLists, openDialog, openConfirm, toast }) {
@@ -311,12 +320,14 @@ function ListPage({ id, entry, me, setLists, openDialog, openConfirm, toast }) {
         items: sessionState.items.map((item) => collectionItems.find((candidate) => candidate.id === item.id) || item),
       }
     : null;
-  const forgetList = useCallback(() => {
+  const forgetList = useCallback((removePreferences = false) => {
     queryClient.removeQueries({ queryKey: listQueryKey(id) });
     setLists(previous => previous.filter(item => item.id !== id));
-    const all = read('sl.listPrefs', {});
-    delete all[id];
-    save('sl.listPrefs', all);
+    if (removePreferences) {
+      const all = read('sl.listPrefs', {});
+      delete all[id];
+      save('sl.listPrefs', all);
+    }
   }, [id, queryClient, setLists]);
   useEffect(() => () => session.close(), [session]);
   useEffect(() => {
@@ -335,7 +346,7 @@ function ListPage({ id, entry, me, setLists, openDialog, openConfirm, toast }) {
     if (!outcome || (outcome.kind !== 'missing' && outcome.kind !== 'deleted') || terminalHandled.current) return;
     terminalHandled.current = true;
     toast(outcome.kind === 'missing' ? 'This list no longer exists.' : 'This list was deleted by its owner.');
-    forgetList();
+    forgetList(true);
     navigate('/');
   }, [sessionState.outcome, forgetList, navigate, toast]);
   useEffect(() => {
@@ -356,9 +367,11 @@ function ListPage({ id, entry, me, setLists, openDialog, openConfirm, toast }) {
     },
   });
   const openMenu = () => openDialog({ type: 'menu', title: list?.name, actions: [{ label: 'Done' }], content: <div className="menu-list"><MenuButton icon="share" label="Invite people…" onClick={() => openDialog({ type: 'share', list })} /><MenuButton icon="sort" label="Sort and group items…" onClick={() => openDialog({ type: 'sort', prefs, setPrefs: updatePrefs })} /><MenuButton icon="edit" label="Rename list" onClick={() => openDialog({ type: 'rename', value: list?.name, onConfirm: value => session.renameList(value) })} /><MenuButton icon="clear" label="Clear list…" danger onClick={() => openConfirm({ title: 'Clear this list?', body: list?.items.length ? `This removes all ${list.items.length} items for everyone in the list. This cannot be undone.` : 'The list is already empty.', confirmLabel: list?.items.length ? 'Clear all items' : 'OK', danger: true, onConfirm: () => list?.items.length && session.clearList() })} />{entry?.ownerToken && <MenuButton icon="trash" label="Delete list…" danger onClick={() => openConfirm({ title: 'Delete list permanently?', body: 'Everyone with access loses this list and all of its items. This cannot be undone.', confirmLabel: 'Delete list', danger: true, onConfirm: () => session.deleteList(entry.ownerToken) })} />}<MenuButton icon="leave" label="Leave list" danger onClick={() => openConfirm({ title: 'Leave this list?', body: 'It stays available to everyone else, and you can rejoin anytime with the invite link.', confirmLabel: 'Leave', danger: true, onConfirm: () => { session.close(); forgetList(); navigate('/'); } })} /></div> });
-  if (!list) return <><header className="topbar"><Link href="/" className="icon-btn" aria-label="All lists"><Icon name="back" /></Link><div className="head-title"><h1>{entry.name}</h1></div><span className={`dot ${sessionState.status === 'live' ? 'live' : sessionState.status === 'missing' ? 'missing' : 'connecting'}`} /></header><div className="empty">Connecting…</div></>;
+  if (!list) return <><header className="topbar"><Link href="/" className="icon-btn" aria-label="All lists"><Icon name="back" /></Link><div className="head-title"><h1>{entry.name}</h1></div><span className={`connection-status status-${sessionState.status}`} role="status">{sessionState.status === 'offline' ? 'Offline' : sessionState.status === 'reconnecting' ? 'Reconnecting' : 'Connecting'}</span><span className={`dot ${sessionState.status === 'offline' ? 'offline' : 'connecting'}`} aria-hidden="true" /></header><div className="empty">Connecting…</div></>;
   const done = list.items.filter(i => i.collected).length;
-  return <><header className="topbar"><Link href="/" className="icon-btn" aria-label="All lists"><Icon name="back" /></Link><div className="head-title"><h1>{list.name}</h1><div className="sub"><span>{list.items.length ? `${list.items.length} ${list.items.length === 1 ? 'item' : 'items'} · ${done} collected` : 'Empty'}</span><span className="people">{sessionState.online.slice(0,4).map(p => <span className="avatar" style={{ '--c': p.color || '#888' } as React.CSSProperties} title={p.name} key={p.clientId}>{initials(p.name)}</span>)}{sessionState.online.length > 4 && <span className="more">+{sessionState.online.length-4}</span>}</span></div></div><span className={`dot ${sessionState.status === 'live' ? 'live' : sessionState.status === 'missing' ? 'missing' : 'connecting'}`} title={`${sessionState.status}${sessionState.pending ? ' · pending changes' : ''}`} /><Button type="button" variant="ghost" size="icon" className="icon-btn" aria-label="List options" onClick={openMenu}><Icon name="dots" /></Button></header><ul className="items">{items.map(item => <ItemRow key={item.id} item={item} session={session} askDelete={askDelete} />)}</ul>{!list.items.length && <div className="empty list-empty show"><div className="big"><Icon name="basket" /></div><p>Nothing here yet.</p><p className="muted">Add your first item with the bar below.</p></div>}<form className="addbar" onSubmit={e => { e.preventDefault(); void addForm.handleSubmit(); }}><addForm.Field name="name">{field => <input ref={addNameRef} className="add-name" value={field.state.value} onChange={e => field.handleChange(e.target.value)} onBlur={field.handleBlur} placeholder="Add item…" maxLength={80} autoComplete="off" aria-label="New item name" aria-invalid={field.state.meta.errors.length > 0} />}</addForm.Field><addForm.Field name="amount">{field => <input className="add-amount" value={field.state.value} onChange={e => field.handleChange(e.target.value)} onBlur={field.handleBlur} placeholder="qty" maxLength={40} autoComplete="off" aria-label="New item amount" aria-invalid={field.state.meta.errors.length > 0} />}</addForm.Field><button className="add-btn" type="submit" aria-label="Add item"><Icon name="plus" /></button></form></>;
+  const statusLabel = sessionState.status === 'live' ? 'Live' : sessionState.status === 'connecting' ? 'Connecting' : sessionState.status === 'reconnecting' ? 'Reconnecting' : sessionState.status === 'offline' ? 'Offline' : sessionState.status === 'missing' ? 'List missing' : sessionState.status === 'deleted' ? 'List deleted' : 'Closed';
+  const statusMessage = `${statusLabel}${sessionState.pending ? ' · Saving changes' : ''}`;
+  return <><header className="topbar"><Link href="/" className="icon-btn" aria-label="All lists"><Icon name="back" /></Link><div className="head-title"><h1>{list.name}</h1><div className="sub"><span>{list.items.length ? `${list.items.length} ${list.items.length === 1 ? 'item' : 'items'} · ${done} collected` : 'Empty'}</span><span className="people">{sessionState.online.slice(0,4).map(p => <span className="avatar" role="img" aria-label={p.name} style={{ '--c': p.color || '#888' } as React.CSSProperties} title={p.name} key={p.clientId}>{initials(p.name)}</span>)}{sessionState.online.length > 4 && <span className="more">+{sessionState.online.length-4}</span>}</span></div></div><span className={`connection-status status-${sessionState.status}`} role="status">{statusMessage}</span><span className={`dot ${sessionState.status === 'live' ? 'live' : sessionState.status === 'missing' || sessionState.status === 'deleted' ? 'missing' : sessionState.status === 'offline' ? 'offline' : 'connecting'}`} aria-hidden="true" /><Button type="button" variant="ghost" size="icon" className="icon-btn" aria-label="List options" onClick={openMenu}><Icon name="dots" /></Button></header><ul className="items">{items.map(item => <ItemRow key={item.id} item={item} session={session} askDelete={askDelete} />)}</ul>{!list.items.length && <div className="empty list-empty show"><div className="big"><Icon name="basket" /></div><p>Nothing here yet.</p><p className="muted">Add your first item with the bar below.</p></div>}<form className="addbar" onSubmit={e => { e.preventDefault(); void addForm.handleSubmit(); }}><addForm.Field name="name">{field => <div className="field-control add-field"><input ref={addNameRef} className="add-name" value={field.state.value} onChange={e => field.handleChange(e.target.value)} onBlur={field.handleBlur} placeholder="Add item…" maxLength={80} autoComplete="off" aria-label="New item name" aria-invalid={field.state.meta.errors.length > 0} /><FieldError field={field} /></div>}</addForm.Field><addForm.Field name="amount">{field => <div className="field-control add-field amount-field"><input className="add-amount" value={field.state.value} onChange={e => field.handleChange(e.target.value)} onBlur={field.handleBlur} placeholder="qty" maxLength={40} autoComplete="off" aria-label="New item amount" aria-invalid={field.state.meta.errors.length > 0} /><FieldError field={field} /></div>}</addForm.Field><button className="add-btn" type="submit" aria-label="Add item"><Icon name="plus" /></button></form></>;
 }
 
 function MenuButton({ icon, label, onClick, danger = false }: { icon: string; label: string; onClick: () => void; danger?: boolean }) { return <button type="button" className={`menu-item ${danger ? 'danger' : ''}`} onClick={onClick}><Icon name={icon} /><span>{label}</span></button>; }
@@ -413,7 +426,7 @@ function PromptDialog({ dialog, close }) {
     validators: { onChange: validationSchema, onSubmit: validationSchema },
     onSubmit: ({ value }) => { dialog.onConfirm(value.value.trim()); close(); },
   });
-  return <Modal open onOpenChange={open => !open && close()} title={dialog.title} actions={[{ label: 'Cancel', onClick: close }, { label: dialog.confirmLabel || 'Save', kind: 'primary', onClick: () => void form.handleSubmit() }]}><p>{dialog.label}</p><form onSubmit={e => { e.preventDefault(); void form.handleSubmit(); }}><form.Field name="value">{field => <><Input className="mt-2.5" autoFocus value={field.state.value} onChange={e => field.handleChange(e.target.value)} onBlur={field.handleBlur} placeholder={dialog.placeholder} maxLength={dialog.maxlength || 60} aria-invalid={field.state.meta.errors.length > 0} /><FieldError field={field} /></>}</form.Field></form></Modal>;
+  return <Modal open onOpenChange={open => !open && close()} title={dialog.title} actions={[{ label: 'Cancel', onClick: close }, { label: dialog.confirmLabel || 'Save', kind: 'primary', onClick: () => void form.handleSubmit() }]}><p>{dialog.label}</p><form onSubmit={e => { e.preventDefault(); void form.handleSubmit(); }}><form.Field name="value">{field => <><Input className="mt-2.5" autoFocus value={field.state.value} onChange={e => field.handleChange(e.target.value)} onBlur={field.handleBlur} placeholder={dialog.placeholder} maxLength={dialog.maxlength || 60} aria-label={dialog.title || 'Value'} aria-invalid={field.state.meta.errors.length > 0} /><FieldError field={field} /></>}</form.Field></form></Modal>;
 }
 
 function ConfirmDialog({ dialog, close }) {
@@ -425,7 +438,14 @@ function ShareDialog({ list, close, toast }) {
   if (!list) return null;
   const url = `${location.origin}/#/join/${list.id}`;
   const copy = async () => { try { await navigator.clipboard.writeText(url); toast('Link copied'); } catch { toast('Copy failed — select the link manually'); } };
-  return <Modal open onOpenChange={open => !open && close()} title="Invite people" actions={[{ label: 'Done', onClick: close }]}><div className="qr"><img src={`/api/qr?data=${encodeURIComponent(url)}`} alt="QR code with the invite link" /></div><div className="share-link"><Input readOnly value={url} aria-label="Invite link" /><Button type="button" variant="ghost" size="icon" className="icon-btn" aria-label="Copy invite link" onClick={copy}><Icon name="copy" /></Button></div>{navigator.share && <Button variant="primary" className="wide mt-2.5 w-full" onClick={() => navigator.share({ title: list.name, text: `Join my shopping list “${list.name}”`, url }).catch(() => {})}>Share link…</Button>}<p className="hint muted">Anyone with this link or QR code can open this list and shop along — no account needed. Keep it private like a key.</p></Modal>;
+  const share = async () => {
+    try {
+      await navigator.share({ title: list.name, text: `Join my shopping list “${list.name}”`, url });
+    } catch {
+      toast('Share failed — copy the invite link instead.');
+    }
+  };
+  return <Modal open onOpenChange={open => !open && close()} title="Invite people" actions={[{ label: 'Done', onClick: close }]}><div className="qr"><img src={`/api/qr?data=${encodeURIComponent(url)}`} alt="QR code with the invite link" /></div><div className="share-link"><Input readOnly value={url} aria-label="Invite link" /><Button type="button" variant="ghost" size="icon" className="icon-btn" aria-label="Copy invite link" onClick={copy}><Icon name="copy" /></Button></div>{typeof navigator.share === 'function' && <Button variant="primary" className="wide mt-2.5 w-full" onClick={() => void share()}>Share link…</Button>}<p className="hint muted">Anyone with this link or QR code can open this list and shop along — no account needed. Keep it private like a key.</p></Modal>;
 }
 
 function SortDialog({ prefs, setPrefs, close }) {

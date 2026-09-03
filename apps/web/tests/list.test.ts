@@ -6,9 +6,14 @@ describe('frontend helpers', () => {
   it('extracts only valid list ids from invite links or codes', () => {
     expect(extractListId('https://example.test/#/join/abcd_123')).toBe('abcd_123');
     expect(extractListId('https://example.test/#/list/abcd_123')).toBe('abcd_123');
+    expect(extractListId('#/join/abcd_123')).toBe('abcd_123');
+    expect(extractListId('/#/join/abcd_123')).toBe('abcd_123');
     expect(extractListId('abcd-123')).toBe('abcd-123');
     expect(extractListId('short')).toBe('short');
     expect(extractListId('https://example.test/#/join/no')).toBeNull();
+    expect(extractListId('https://example.test/#/join/abcd_123/extra')).toBeNull();
+    expect(extractListId('https://example.test/#/join/abcd_123?unexpected=true')).toBeNull();
+    expect(extractListId('prefix https://example.test/#/join/abcd_123 suffix')).toBeNull();
     expect(extractListId('not an invite')).toBeNull();
     expect(extractListId(null)).toBeNull();
   });

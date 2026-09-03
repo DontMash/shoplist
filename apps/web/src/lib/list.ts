@@ -39,10 +39,18 @@ export function initials(name: unknown): string {
     .join('') || '?';
 }
 
+const LIST_ID = /^[A-Za-z0-9_-]{4,40}$/;
+const HASH_INVITE = /^#\/(?:join|list)\/([A-Za-z0-9_-]{4,40})$/;
+
 export function extractListId(value: unknown): string | null {
-  const text = String(value || '').trim();
-  const match = text.match(/#\/(?:join|list)\/([A-Za-z0-9_-]{4,40})/);
-  return match ? match[1] : (/^[A-Za-z0-9_-]{4,40}$/.test(text) ? text : null);
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (LIST_ID.test(text)) return text;
+
+  const hash = text.startsWith('#') ? text : text.startsWith('/#') ? text.slice(1) : (() => {
+    try { return new URL(text).hash; } catch { return ''; }
+  })();
+  const match = hash.match(HASH_INVITE);
+  return match ? match[1] : null;
 }
 
 export function sortItems(items: ListItem[], preferences: ListPreferences): ListItem[] {

@@ -207,7 +207,10 @@ export function sameOrigin(request: Request): boolean {
   const origin = request.headers.get('origin');
   if (!origin) return true; // non-browser clients are allowed
   try {
-    return new URL(origin).host === request.headers.get('host');
+    // Origin matching includes the scheme as well as host and port. Comparing
+    // only `host` would let an HTTPS browser origin use an HTTP request with
+    // the same hostname, which is not same-origin.
+    return new URL(origin).origin === new URL(request.url).origin;
   } catch {
     return false;
   }
@@ -319,7 +322,7 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
 
     return {
       onOpen(_event, socket) {
-        const listId = (c.req.query('list') || '').slice(0, 40);
+        const listId = c.req.query('list') || '';
         const clientId = cleanText(c.req.query('client'), 64);
         const name = cleanText(c.req.query('name'), 40) || 'Guest';
         const list = store.getList(listId);
@@ -383,11 +386,13 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
 
         if (message.t === 'operation' && (typeof message.opId === 'string' || typeof message.operationId === 'string')) {
           const opId = typeof message.opId === 'string' ? message.opId : String(message.operationId);
-          socket.send(JSON.stringify({
-            t: 'ack', opId, status: 'rejected', revision: current.revision,
-            reason: 'invalid-operation', reasonCode: 'invalid-operation',
-            message: 'The operation is not supported.',
-          }));
+          const result = store.applyOperation(connection.listId, {
+            operationId: opId,
+            kind: (typeof message.kind === 'string' ? message.kind : '') as OperationKind,
+            payload: isRecord(message.payload) ? message.payload : {},
+            actorClientId: connection.clientId,
+          });
+          socket.send(JSON.stringify(result.ack));
           return;
         }
 
@@ -427,8 +432,11 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
     };
   }));
 
-  // API routes above take precedence. The Node static middleware safely
-  // confines requests to publicDir and returns 404 for missing files.
+  // API routes above take precedence. Do not let an unsupported API method
+  // fall through to the frontend shell (or look like a static-file miss).
+  app.all('/api/*', (c) => json(c, 405, { error: 'method not allowed' }));
+  // The Node static middleware safely confines requests to publicDir and
+  // returns 404 for missing files.
   app.get('*', serveStatic({ root: publicDir }));
   app.on(['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], '*', (c) => json(c, 405, { error: 'method not allowed' }));
   app.notFound((c) => json(c, 404, { error: 'not found' }));

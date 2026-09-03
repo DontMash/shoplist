@@ -150,12 +150,56 @@ function cloneItem(item: ListItem): ListItem {
   return { ...item };
 }
 
-function normalizeBase(id: string, response: ListResponse): BaseState | null {
-  if (response.list.id !== id) return null;
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function normalizeOnline(value: unknown): SessionParticipant[] | null {
+  if (!Array.isArray(value)) return null;
+  const participants = value.map((entry) => {
+    if (!isRecord(entry) || typeof entry.clientId !== 'string' || !entry.clientId ||
+      typeof entry.name !== 'string' || typeof entry.color !== 'string') return null;
+    return { clientId: entry.clientId, name: entry.name, color: entry.color };
+  });
+  return participants.some((participant) => participant === null) ? null : participants as SessionParticipant[];
+}
+
+function normalizeItem(value: unknown): ListItem | null {
+  if (!isRecord(value) || typeof value.id !== 'string' || !value.id || typeof value.name !== 'string' || !value.name) {
+    return null;
+  }
+  if (value.amount !== undefined && typeof value.amount !== 'string') return null;
+  if (value.collected !== undefined && typeof value.collected !== 'boolean') return null;
+  if (value.createdAt !== undefined && (typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt))) return null;
+  if (value.updatedAt !== undefined && (typeof value.updatedAt !== 'number' || !Number.isFinite(value.updatedAt))) return null;
+  if (value.by !== undefined && value.by !== null && typeof value.by !== 'string') return null;
+  const amount = value.amount as string | undefined;
+  const collected = value.collected as boolean | undefined;
   return {
-    list: { id: response.list.id, name: response.list.name, createdAt: response.list.createdAt },
-    items: response.items.map((item) => ({ ...item, amount: item.amount || '', collected: Boolean(item.collected) })),
-    revision: response.list.revision ?? 0,
+    id: value.id,
+    name: value.name,
+    amount: amount === undefined ? '' : amount,
+    collected: collected === undefined ? false : collected,
+    ...(value.createdAt === undefined ? {} : { createdAt: value.createdAt as number }),
+    ...(value.updatedAt === undefined ? {} : { updatedAt: value.updatedAt as number }),
+    ...(value.by === undefined ? {} : { by: value.by as string | null }),
+  };
+}
+
+function normalizeBase(id: string, response: unknown): BaseState | null {
+  if (!isRecord(response) || !isRecord(response.list) || !Array.isArray(response.items)) return null;
+  const list = response.list;
+  if (list.id !== id || typeof list.name !== 'string' || typeof list.createdAt !== 'number' || !Number.isFinite(list.createdAt)) {
+    return null;
+  }
+  const revision = list.revision === undefined ? 0 : list.revision;
+  if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0) return null;
+  const items = response.items.map(normalizeItem);
+  if (items.some((item) => item === null)) return null;
+  return {
+    list: { id: list.id, name: list.name, createdAt: list.createdAt },
+    items: items as ListItem[],
+    revision,
   };
 }
 
@@ -517,6 +561,7 @@ class ListSessionImpl implements ListSession {
   }
 
   public clearList(): string | null {
+    if (this.visibleItems().length === 0) return null;
     const operationId = this.randomId();
     this.enqueue({ operationId, kind: 'list:clear', payload: {}, state: 'queued' });
     this.optimisticClear();
@@ -601,21 +646,21 @@ class ListSessionImpl implements ListSession {
       const incoming = message as unknown as SnapshotMessage;
       if (isRecord(incoming.list) && Array.isArray(incoming.list.items)) {
         this.acceptSnapshot({
-          list: {
-            id: String(incoming.list.id), name: String(incoming.list.name),
-            createdAt: Number(incoming.list.createdAt) || 0,
-            revision: Number(incoming.list.revision) || 0,
-          },
+          list: incoming.list as SnapshotMessage['list'],
           items: incoming.list.items as ListResponseItem[],
           memberCount: this.queryClient?.getQueryData<ListResponse>(listQueryKey(this.listId))?.memberCount,
         });
       }
-      if (message.t === 'init' && Array.isArray(message.online)) this.online = message.online as SessionParticipant[];
+      if (message.t === 'init') {
+        const online = normalizeOnline(message.online);
+        if (online) this.online = online;
+      }
       this.refreshSnapshot();
       return;
     }
-    if (message.t === 'presence' && Array.isArray(message.online)) {
-      this.online = message.online as SessionParticipant[];
+    if (message.t === 'presence') {
+      const online = normalizeOnline(message.online);
+      if (online) this.online = online;
       this.refreshSnapshot();
       return;
     }
@@ -635,7 +680,7 @@ class ListSessionImpl implements ListSession {
     }
   }
 
-  private acceptSnapshot(response: ListResponse): void {
+  private acceptSnapshot(response: unknown): void {
     const incoming = normalizeBase(this.listId, response);
     if (!incoming) return;
     if (this.terminalState || (this.base && incoming.revision < this.base.revision)) return;
@@ -648,12 +693,19 @@ class ListSessionImpl implements ListSession {
 
   private acceptAcknowledgement(message: AckMessage): void {
     const operationId = message.opId || message.operationId;
-    if (!operationId) return;
+    if (!operationId || (message.status !== 'accepted' && message.status !== 'rejected')) return;
+    if (typeof message.revision !== 'number' || !Number.isInteger(message.revision) || message.revision < 0) return;
+    const acknowledgedItem = message.item === undefined ? undefined : normalizeItem(message.item);
+    if (message.item !== undefined && !acknowledgedItem) return;
+    if (message.itemId !== undefined && !isNonEmptyString(message.itemId)) return;
+    if (message.tempItemId !== undefined && !isNonEmptyString(message.tempItemId)) return;
+    const idMap = message.idMap;
+    if (idMap !== undefined && (!isRecord(idMap) || !isNonEmptyString(idMap.tempId) || !isNonEmptyString(idMap.itemId))) return;
     const index = this.pendingOperations.findIndex((operation) => operation.operationId === operationId);
     if (index === -1) return;
     const operation = this.pendingOperations[index];
     this.inFlight = this.inFlight === operationId ? null : this.inFlight;
-    const revision = Number.isFinite(message.revision) ? Number(message.revision) : this.base?.revision || 0;
+    const revision = message.revision;
     if (message.status === 'rejected') {
       this.pendingOperations.splice(index, 1);
       if (operation.kind === 'item:add' && operation.tempItemId) {
@@ -669,11 +721,11 @@ class ListSessionImpl implements ListSession {
     }
     operation.state = 'accepted';
     operation.ackRevision = revision;
-    if (message.item) operation.serverItem = cloneItem(message.item);
+    if (acknowledgedItem) operation.serverItem = cloneItem(acknowledgedItem);
     if (message.itemId) operation.serverItemId = message.itemId;
-    if (message.idMap?.itemId) operation.serverItemId = message.idMap.itemId;
+    if (idMap?.itemId) operation.serverItemId = idMap.itemId;
     if (message.tempItemId && operation.tempItemId) operation.tempItemId = message.tempItemId;
-    if (message.idMap?.tempId && operation.tempItemId) operation.tempItemId = message.idMap.tempId;
+    if (idMap?.tempId && operation.tempItemId) operation.tempItemId = idMap.tempId;
     this.outcome = { kind: 'accepted', operationId, operationKind: operation.kind, revision };
     if (operation.kind === 'list:delete') {
       this.terminal('deleted');
@@ -723,6 +775,12 @@ class ListSessionImpl implements ListSession {
     const dropIndex = this.pendingOperations.findIndex((candidate) => candidate.state === 'queued');
     if (dropIndex === -1) return;
     const [dropped] = this.pendingOperations.splice(dropIndex, 1);
+    const droppedTempId = dropped.kind === 'item:add' ? dropped.tempItemId : undefined;
+    if (droppedTempId) {
+      this.pendingOperations = this.pendingOperations.filter((candidate) => (
+        candidate.payload.id !== droppedTempId
+      ));
+    }
     this.outcome = {
       kind: 'rejected', operationId: dropped.operationId, operationKind: dropped.kind,
       reason: 'outbox-full', message: 'Offline changes are full.',
