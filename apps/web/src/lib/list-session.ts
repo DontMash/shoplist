@@ -1,4 +1,4 @@
-import { createCollection, type Collection } from '@tanstack/db';
+import { createCollection, type Collection, type NonSingleResult } from '@tanstack/db';
 import type { QueryClient } from '@tanstack/react-query';
 import { listQueryKey, type ListResponse, type ListResponseItem } from './api';
 import { uid, type ListItem } from './list';
@@ -218,8 +218,8 @@ export function createListSession(options: ListSessionOptions): ListSession {
 }
 
 /** React integration uses this bridge without exposing collection mechanics in the session interface. */
-export function getListSessionCollection(session: ListSession): Collection<ListItem> {
-  return (session as ListSessionImpl).collection;
+export function getListSessionCollection(session: ListSession): Collection<ListItem> & NonSingleResult {
+  return (session as ListSessionImpl).collection as Collection<ListItem> & NonSingleResult;
 }
 
 class ListSessionImpl implements ListSession {

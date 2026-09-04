@@ -28,13 +28,13 @@ const CRC_TABLE = (() => {
   return t;
 })();
 
-function crc32(buf) {
+function crc32(buf: Buffer): number {
   let c = 0xffffffff;
   for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function chunk(type, data) {
+function chunk(type: string, data: Buffer): Buffer {
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length);
   const t = Buffer.from(type, 'ascii');
@@ -43,7 +43,7 @@ function chunk(type, data) {
   return Buffer.concat([len, t, data, crc]);
 }
 
-function png(size, pixelFn) {
+function png(size: number, pixelFn: (x: number, y: number) => [number, number, number, number]): Buffer {
   const stride = size * 4 + 1;
   const raw = Buffer.alloc(stride * size);
   for (let y = 0; y < size; y++) {
@@ -69,16 +69,16 @@ function png(size, pixelFn) {
 
 // ------------------------------------------------------------- geometry
 
-const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
 
-function inRoundedRect(x, y, x0, y0, x1, y1, r) {
+function inRoundedRect(x: number, y: number, x0: number, y0: number, x1: number, y1: number, r: number): boolean {
   if (x < x0 || x > x1 || y < y0 || y > y1) return false;
   const cx = Math.max(x0 + r, Math.min(x1 - r, x));
   const cy = Math.max(y0 + r, Math.min(y1 - r, y));
   return (x - cx) ** 2 + (y - cy) ** 2 <= r * r;
 }
 
-function distToSeg(px, py, ax, ay, bx, by) {
+function distToSeg(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const abx = bx - ax;
   const aby = by - ay;
   const t = clamp01(((px - ax) * abx + (py - ay) * aby) / (abx * abx + aby * aby || 1));
@@ -92,7 +92,7 @@ function distToSeg(px, py, ax, ay, bx, by) {
  * maskable=true renders a full-bleed background with the glyph shrunk
  * into the safe zone (80%).
  */
-function drawIcon(size, { maskable = false } = {}) {
+function drawIcon(size: number, { maskable = false }: { maskable?: boolean } = {}): Buffer {
   const SS = 3;
   const s = maskable ? 0.72 : 1; // glyph scale (safe zone)
   const lw = 0.105 / s;          // stroke width in transformed space
