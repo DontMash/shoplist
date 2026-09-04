@@ -1,15 +1,14 @@
 import { createCollection, type Collection } from '@tanstack/db';
 import type { QueryClient } from '@tanstack/react-query';
-import { fetchList, listQueryKey, type ListResponse, type ListResponseItem } from './api';
+import { listQueryKey, type ListResponse, type ListResponseItem } from './api';
 import { uid, type ListItem } from './list';
-
-export type OperationKind =
-  | 'item:add'
-  | 'item:update'
-  | 'item:delete'
-  | 'list:clear'
-  | 'list:rename'
-  | 'list:delete';
+import {
+  browserListSessionTransport,
+  type ClientOperation,
+  type ListSessionTransport,
+  type OperationKind,
+  type SessionConnection,
+} from './list-session-transport';
 
 export type SessionStatus =
   | 'connecting'
@@ -76,33 +75,6 @@ export interface ItemUpdate {
   amount?: string;
   collected?: boolean;
 }
-
-export interface ClientOperation {
-  operationId: string;
-  kind: OperationKind;
-  payload: Record<string, unknown>;
-}
-
-export interface SessionConnectionHandlers {
-  onOpen: () => void;
-  onMessage: (message: unknown) => void;
-  onClose: (info?: { code?: number; reason?: string }) => void;
-}
-
-export interface SessionConnection {
-  send(operation: ClientOperation): void;
-  close(): void;
-}
-
-/** Transport seam used by the session. It is deliberately independent of WebSocket. */
-export interface ListSessionTransport {
-  fetchSnapshot(listId: string, signal?: AbortSignal): Promise<ListResponse>;
-  connect(
-    options: { listId: string; clientId: string; name: string } & SessionConnectionHandlers,
-  ): SessionConnection;
-}
-
-export type ListSessionAdapter = ListSessionTransport;
 
 interface BaseState {
   list: { id: string; name: string; createdAt: number };
@@ -206,144 +178,6 @@ function normalizeBase(id: string, response: unknown): BaseState | null {
 function initialFromCache(id: string, queryClient?: QueryClient, initial?: ListResponse): BaseState | null {
   const response = initial || queryClient?.getQueryData<ListResponse>(listQueryKey(id));
   return response ? normalizeBase(id, response) : null;
-}
-
-/** Browser implementation of the list session transport. */
-export const browserListSessionTransport: ListSessionTransport = {
-  fetchSnapshot: fetchList,
-  connect(options) {
-    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-    const socket = new WebSocket(
-      `${scheme}://${location.host}/ws?list=${encodeURIComponent(options.listId)}` +
-      `&client=${encodeURIComponent(options.clientId)}&name=${encodeURIComponent(options.name || 'Guest')}`,
-    );
-    socket.onopen = options.onOpen;
-    socket.onmessage = (event) => {
-      try {
-        options.onMessage(JSON.parse(String(event.data)));
-      } catch {
-        // Malformed server data cannot be allowed to break the list session.
-      }
-    };
-    socket.onclose = (event) => options.onClose({ code: event.code, reason: event.reason });
-    socket.onerror = () => {
-      try { socket.close(); } catch { /* noop */ }
-    };
-    return {
-      send(operation) {
-        if (socket.readyState !== WebSocket.OPEN) throw new Error('socket is not open');
-        socket.send(JSON.stringify(toWireOperation(operation)));
-      },
-      close() {
-        try { socket.close(); } catch { /* noop */ }
-      },
-    };
-  },
-};
-
-function toWireOperation(operation: ClientOperation): Record<string, unknown> {
-  const { operationId: opId, kind, payload } = operation;
-  switch (kind) {
-    case 'item:add':
-      return { t: kind, opId, tempId: payload.tempItemId, item: { name: payload.name, amount: payload.amount } };
-    case 'item:update':
-      return { t: kind, opId, id: payload.id, patch: payload.patch };
-    case 'item:delete':
-      return { t: kind, opId, id: payload.id };
-    case 'list:rename':
-      return { t: kind, opId, name: payload.name };
-    case 'list:delete':
-      return { t: kind, opId, ownerToken: payload.ownerToken };
-    case 'list:clear':
-      return { t: kind, opId };
-  }
-}
-
-/**
- * A deterministic adapter for session tests and embedders. No timers or
- * network are hidden inside it: callers explicitly open connections and
- * deliver REST, snapshot, and acknowledgement messages.
- */
-export class InMemoryListSessionTransport implements ListSessionTransport {
-  public readonly sent: ClientOperation[] = [];
-  public readonly connections: Array<InMemorySessionConnection> = [];
-  public autoOpen = true;
-  public deferBootstrap = false;
-  public bootstrapSnapshot: ListResponse;
-  public onSend: ((operation: ClientOperation) => void) | null = null;
-  private bootstrapWaiters: Array<{ resolve: (value: ListResponse) => void; reject: (error: unknown) => void }> = [];
-
-  public constructor(snapshot?: ListResponse) {
-    this.bootstrapSnapshot = snapshot || {
-      list: { id: 'list', name: 'Shopping list', createdAt: 0, revision: 0 },
-      items: [],
-      memberCount: 0,
-    };
-  }
-
-  public fetchSnapshot(_listId: string, _signal?: AbortSignal): Promise<ListResponse> {
-    if (!this.deferBootstrap) return Promise.resolve(this.bootstrapSnapshot);
-    return new Promise((resolve, reject) => this.bootstrapWaiters.push({ resolve, reject }));
-  }
-
-  public resolveBootstrap(snapshot = this.bootstrapSnapshot): void {
-    this.bootstrapSnapshot = snapshot;
-    const waiters = this.bootstrapWaiters.splice(0);
-    waiters.forEach(({ resolve }) => resolve(snapshot));
-  }
-
-  public rejectBootstrap(error: unknown = new Error('offline')): void {
-    const waiters = this.bootstrapWaiters.splice(0);
-    waiters.forEach(({ reject }) => reject(error));
-  }
-
-  public connect(options: { listId: string; clientId: string; name: string } & SessionConnectionHandlers): SessionConnection {
-    const connection = new InMemorySessionConnection(options, this);
-    this.connections.push(connection);
-    if (this.autoOpen) queueMicrotask(() => connection.open());
-    return connection;
-  }
-
-  public open(): void { this.connections.filter((connection) => !connection.closed).forEach((connection) => connection.open()); }
-  public disconnect(code = 1006, reason = 'offline'): void { this.connections.forEach((connection) => connection.closeFromPeer(code, reason)); }
-  public deliverSnapshot(snapshot: ListResponse, connection?: InMemorySessionConnection): void {
-    const message = { t: 'state', list: { ...snapshot.list, items: snapshot.items } };
-    (connection ? [connection] : this.connections).forEach((target) => target.deliver(message));
-  }
-  public deliverAck(ack: Omit<AckMessage, 't'>, connection?: InMemorySessionConnection): void {
-    const message = { t: 'ack', ...ack };
-    (connection ? [connection] : this.connections).forEach((target) => target.deliver(message));
-  }
-  public deliver(message: unknown, connection?: InMemorySessionConnection): void {
-    (connection ? [connection] : this.connections).forEach((target) => target.deliver(message));
-  }
-}
-
-export class InMemorySessionConnection implements SessionConnection {
-  public closed = false;
-  public openState = false;
-  public constructor(
-    private readonly options: SessionConnectionHandlers,
-    private readonly transport: InMemoryListSessionTransport,
-  ) {}
-  public open(): void {
-    if (this.closed || this.openState) return;
-    this.openState = true;
-    this.options.onOpen();
-  }
-  public send(operation: ClientOperation): void {
-    if (this.closed || !this.openState) throw new Error('connection is not open');
-    this.transport.sent.push({ ...operation, payload: { ...operation.payload } });
-    this.transport.onSend?.(operation);
-  }
-  public deliver(message: unknown): void { if (!this.closed) this.options.onMessage(message); }
-  public closeFromPeer(code = 1006, reason = 'offline'): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.openState = false;
-    this.options.onClose({ code, reason });
-  }
-  public close(): void { this.closeFromPeer(1000, 'closed'); }
 }
 
 export interface ListSessionOptions {
@@ -952,8 +786,3 @@ class ListSessionImpl implements ListSession {
 
   private notify(): void { for (const listener of this.listeners) listener(); }
 }
-
-/** Factory form is convenient in tests while the class supports manual control. */
-export const createInMemoryListSessionTransport = (snapshot?: ListResponse): InMemoryListSessionTransport => (
-  new InMemoryListSessionTransport(snapshot)
-);
