@@ -20,6 +20,33 @@ registerSW({ immediate: true });
 const root = document.getElementById('root');
 if (!root) throw new Error('The application root is missing');
 
+console.info(`                                       
+ 
+  @@@@@                            
+ @@@@@@@                           
+ @@@@@@@@@@@@@@@                   
+    @@@@@@@@@@@@@@@@@@@@@@@@@@     
+    @@@@@@@@@@@@@@@@@@@@@@@@@@     
+    @@@@                  @@@@     
+    @@@@                  @@@@     
+    @@@@                  @@@@     
+    @@@@                 @@@@      
+    @@@@@@@@@@@@@@@@@@@@@@@@@      
+    @@@@@@@@@@@@@@@@@@@@@@@@@      
+    @@@@@@@@@@@@@@@@@@@@@@@@       
+    @@@@                           
+  @@@@@@@@@@@@@@@@@@@@@@@@@        
+ @@@@@@@@@@@@@@@@@@@@@@@@@@@@      
+ @@@@  @@@@       @@@@@  @@@@      
+ @@@@@@@@@@        @@@@@@@@@@      
+  @@@@@@@@         @@@@@@@@@       
+    @@@               @@@          
+                                       
+           Shoplist
+
+made with ♥  by https://www.soren.codes
+`);
+
 createRoot(root).render(
   <QueryClientProvider client={queryClient}>
     <Router hook={useHashLocation}>
