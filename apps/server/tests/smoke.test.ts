@@ -416,6 +416,17 @@ describe('Hono API and realtime server', () => {
     expect((await fetch(`${base}/api/lists`, { method: 'GET' })).status).toBe(405);
     expect((await fetch(`${base}/api/unknown`, { method: 'GET' })).status).toBe(405);
     expect((await fetch(`${base}/api/lists`, { method: 'POST', headers: { origin: 'https://evil.example' } })).status).toBe(403);
+    const forwardedCreate = await fetch(`${base}/api/lists`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://shoplist.example',
+        'x-forwarded-host': 'shoplist.example',
+        'x-forwarded-proto': 'https',
+      },
+      body: JSON.stringify({ name: 'Forwarded list' }),
+    });
+    expect(forwardedCreate.status).toBe(201);
     expect((await fetch(`${base}/api/lists`, { method: 'POST' })).status).toBe(415);
     expect((await fetch(`${base}/api/lists`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{',

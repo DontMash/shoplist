@@ -203,14 +203,24 @@ export function messageText(data: unknown): string {
   return '';
 }
 
+function firstHeaderValue(value: string | null): string | null {
+  const first = value?.split(',')[0]?.trim();
+  return first || null;
+}
+
 export function sameOrigin(request: Request): boolean {
   const origin = request.headers.get('origin');
   if (!origin) return true; // non-browser clients are allowed
   try {
-    // Origin matching includes the scheme as well as host and port. Comparing
-    // only `host` would let an HTTPS browser origin use an HTTP request with
-    // the same hostname, which is not same-origin.
-    return new URL(origin).origin === new URL(request.url).origin;
+    // The Node listener sees the internal HTTP hop when TLS terminates at a
+    // reverse proxy. Use the public origin metadata that standard proxies
+    // forward, while still requiring an exact scheme, host, and port match.
+    const requestUrl = new URL(request.url);
+    const forwardedProto = firstHeaderValue(request.headers.get('x-forwarded-proto'));
+    const forwardedHost = firstHeaderValue(request.headers.get('x-forwarded-host'));
+    if (forwardedProto && forwardedProto !== 'http' && forwardedProto !== 'https') return false;
+    const requestOrigin = `${forwardedProto || requestUrl.protocol.slice(0, -1)}://${forwardedHost || request.headers.get('host') || requestUrl.host}`;
+    return new URL(origin).origin === new URL(requestOrigin).origin;
   } catch {
     return false;
   }
