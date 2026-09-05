@@ -505,6 +505,11 @@ h1, h2, h3, p { margin: 0; }
 
 /* ---------------------------------------------------------- dialogs */
 
+/* Base UI's select uses this class when it needs to hide scrollbars. Keep the
+   rules in the bundled stylesheet so the select remains CSP-compatible. */
+.base-ui-disable-scrollbar { scrollbar-width: none; }
+.base-ui-disable-scrollbar::-webkit-scrollbar { display: none; }
+
 /* The structure and animations come from the shadcn Dialog component. Keep
    only the product-specific scrim treatment here. */
 [data-slot="dialog-overlay"], [data-slot="alert-dialog-overlay"] { background: rgba(0, 0, 0, 0.45); }

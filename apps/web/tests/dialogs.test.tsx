@@ -54,6 +54,16 @@ describe('declarative dialogs', () => {
     await waitFor(() => expect(onApply).toHaveBeenCalledWith({ sort: 'name-desc', groupCollected: false }));
   });
 
+  it('does not add Base UI inline styles when opening the sort select', async () => {
+    render(<SortDialog payload={{ preferences: DEFAULT_LIST_PREFERENCES, onApply: vi.fn() }} close={close} />);
+    fireEvent.click(screen.getByRole('combobox'));
+    await screen.findByRole('listbox');
+
+    expect([...document.querySelectorAll('style')].some((style) => (
+      style.textContent?.includes('.base-ui-disable-scrollbar')
+    ))).toBe(false);
+  });
+
   it('copies and shares an invite through the platform APIs', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const share = vi.fn().mockResolvedValue(undefined);
