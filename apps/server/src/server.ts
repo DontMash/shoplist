@@ -219,8 +219,18 @@ export function sameOrigin(request: Request): boolean {
     const forwardedProto = firstHeaderValue(request.headers.get('x-forwarded-proto'));
     const forwardedHost = firstHeaderValue(request.headers.get('x-forwarded-host'));
     if (forwardedProto && forwardedProto !== 'http' && forwardedProto !== 'https') return false;
+    const originUrl = new URL(origin);
     const requestOrigin = `${forwardedProto || requestUrl.protocol.slice(0, -1)}://${forwardedHost || request.headers.get('host') || requestUrl.host}`;
-    return new URL(origin).origin === new URL(requestOrigin).origin;
+    const requestOriginUrl = new URL(requestOrigin);
+    if (originUrl.origin === requestOriginUrl.origin) return true;
+
+    // Some upgrade proxies preserve Host but omit the public scheme. An
+    // HTTPS-origin WebSocket with an exact host match is still unambiguous;
+    // never apply this fallback to ordinary HTTP requests or HTTP origins.
+    return request.headers.get('upgrade')?.toLowerCase() === 'websocket'
+      && requestUrl.protocol === 'http:'
+      && originUrl.protocol === 'https:'
+      && originUrl.host === requestOriginUrl.host;
   } catch {
     return false;
   }

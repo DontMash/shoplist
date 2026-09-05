@@ -303,6 +303,15 @@ describe('server helpers', () => {
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'http://example.test' } }))).toBe(true);
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'https://evil.example' } }))).toBe(false);
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'https://example.test' } }))).toBe(false);
+    expect(sameOrigin(new Request('http://internal.example/ws', {
+      headers: { host: 'example.test', origin: 'https://example.test', upgrade: 'websocket' },
+    }))).toBe(true);
+    expect(sameOrigin(new Request('http://internal.example/ws', {
+      headers: { host: 'internal.example', origin: 'http://example.test', upgrade: 'websocket' },
+    }))).toBe(false);
+    expect(sameOrigin(new Request('http://internal.example/ws', {
+      headers: { host: 'example.test', origin: 'https://evil.example', upgrade: 'websocket' },
+    }))).toBe(false);
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'not-a-url' } }))).toBe(false);
 
     const first = { clientId: 'same', name: 'First', color: colorFor('same') };
@@ -491,6 +500,18 @@ describe('Hono API and realtime server', () => {
     expect(missingClientCode).toBe(4004);
   });
 
+  it('accepts websocket origins when a TLS proxy omits forwarded scheme', async () => {
+    const created = await (await fetch(`${base}/api/lists`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Forwarded websocket' }),
+    })).json() as { list: { id: string } };
+    const client = await connect(`${wsBase}/ws?list=${created.list.id}&client=forwarded&name=Proxy`, {
+      Host: 'shoplist.example',
+      Origin: 'https://shoplist.example',
+    });
+    await waitFor(client.messages, (message) => message.t === 'init');
+    await close(client.socket);
+  });
+
   it('handles websocket validation, every operation, and room cleanup', async () => {
     const created = await (await fetch(`${base}/api/lists`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Operations' }),
@@ -643,9 +664,9 @@ describe('Hono API and realtime server', () => {
 type Message = Record<string, any>;
 type Client = { socket: WebSocket; messages: Message[] };
 
-function connect(url: string): Promise<Client> {
+function connect(url: string, headers: Record<string, string> = {}): Promise<Client> {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url);
+    const socket = new WebSocket(url, { headers });
     const messages: Message[] = [];
     socket.on('message', (data) => {
       try { messages.push(JSON.parse(data.toString()) as Message); } catch { /* ignore */ }

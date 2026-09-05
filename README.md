@@ -118,11 +118,13 @@ pnpm start          # serves the Vite build on port 3000
 
 - Put the container behind a reverse proxy with **TLS** for remote use
   (clipboard, share sheet and QR scanning work best in secure contexts;
-  `localhost` is exempt). The proxy must preserve the public host and scheme
+  `localhost` is exempt). The proxy should preserve the public host and scheme
   in `X-Forwarded-Host` and `X-Forwarded-Proto` (and overwrite client-supplied
   values); the server uses them for same-origin checks after TLS termination.
-  WebSockets pass through any standard proxy — just make sure upgrade requests
-  reach the app (default behavior on nginx, Caddy, Traefik, Cloudflare).
+  For WebSocket upgrades, preserving the public `Host` is required if the proxy
+  omits the forwarded scheme. WebSockets pass through any standard proxy — just
+  make sure upgrade requests reach the app (default behavior on nginx, Caddy,
+  Traefik, Cloudflare).
 - The app is designed to be served from the **domain root** (`/`).
 - To start over, delete the volume / `data/db.sqlite` (and any `.legacy-*` backup).
 
