@@ -312,6 +312,12 @@ describe('server helpers', () => {
     expect(sameOrigin(new Request('http://internal.example/ws', {
       headers: { host: 'example.test', origin: 'https://evil.example', upgrade: 'websocket' },
     }))).toBe(false);
+    expect(sameOrigin(new Request('http://internal.example/ws', {
+      headers: { host: 'internal.example', origin: 'https://shoplist.example', upgrade: 'websocket' },
+    }), 'https://shoplist.example')).toBe(true);
+    expect(sameOrigin(new Request('http://internal.example/ws', {
+      headers: { host: 'internal.example', origin: 'https://evil.example', upgrade: 'websocket' },
+    }), 'https://shoplist.example')).toBe(false);
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'not-a-url' } }))).toBe(false);
 
     const first = { clientId: 'same', name: 'First', color: colorFor('same') };
@@ -355,6 +361,7 @@ describe('Hono API and realtime server', () => {
       running = startServer({
         host: '127.0.0.1',
         port: 0,
+        buildId: 'test-build',
         dataFile: path.join(directory, 'db.json'),
         publicDir: path.join(directory, 'public'),
         onListening: (port) => {
@@ -377,13 +384,25 @@ describe('Hono API and realtime server', () => {
     const previousPublicDir = process.env.PUBLIC_DIR;
     process.env.DATA_DIR = dataDirectory;
     delete process.env.PUBLIC_DIR;
-    const resources = createApp();
+    const resources = createApp({ buildId: 'debug-build', originDebug: true });
     const tooLarge = await resources.app.request('/api/lists', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'content-length': '1' },
       body: 'x'.repeat(17 * 1024),
     });
     expect(tooLarge.status).toBe(413);
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const badOrigin = await resources.app.request('/api/lists', {
+      method: 'POST',
+      headers: { origin: 'https://evil.example' },
+    });
+    expect(badOrigin.status).toBe(403);
+    expect(warning).toHaveBeenCalledWith('[DEBUG-origin]', expect.objectContaining({
+      origin: 'https://evil.example',
+      upgrade: false,
+      configuredPublicOrigin: '<unset>',
+    }));
+    warning.mockRestore();
     const emptyBody = await resources.app.request('/api/lists', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -415,7 +434,8 @@ describe('Hono API and realtime server', () => {
     const health = await fetch(`${base}/healthz`);
     expect(health.status).toBe(200);
     expect(health.headers.get('content-security-policy')).toContain("default-src 'none'");
-    expect(await health.json()).toMatchObject({ ok: true, lists: 0 });
+    expect(health.headers.get('x-shoplist-build')).toBe('test-build');
+    expect(await health.json()).toMatchObject({ ok: true, lists: 0, build: 'test-build' });
 
     const shell = await fetch(`${base}/`);
     expect(shell.status).toBe(200);

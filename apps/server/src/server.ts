@@ -22,6 +22,10 @@ const BUILT_DIR = path.resolve(SERVER_DIR, '../web/dist');
 const LIST_ID = /^[A-Za-z0-9_-]{4,40}$/;
 const BODY_LIMIT = 16 * 1024;
 
+function safeBuildId(value: string | undefined): string {
+  return value && /^[A-Za-z0-9._-]{1,128}$/.test(value) ? value : 'unknown';
+}
+
 export const CSP =
   "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; " +
   "connect-src 'self' ws: wss:; manifest-src 'self'; font-src 'self'; " +
@@ -38,12 +42,16 @@ export interface AppOptions {
   dataFile?: string;
   publicDir?: string;
   store?: Store;
+  publicOrigin?: string;
+  buildId?: string;
+  originDebug?: boolean;
 }
 
 export interface ShoplistApp {
   app: Hono;
   store: Store;
   rooms: Rooms;
+  buildId: string;
 }
 
 interface ClientInfo {
@@ -208,10 +216,17 @@ function firstHeaderValue(value: string | null): string | null {
   return first || null;
 }
 
-export function sameOrigin(request: Request): boolean {
+export function sameOrigin(request: Request, publicOrigin?: string): boolean {
   const origin = request.headers.get('origin');
   if (!origin) return true; // non-browser clients are allowed
   try {
+    const originUrl = new URL(origin);
+    if (publicOrigin) {
+      const configuredOrigin = new URL(publicOrigin);
+      if (configuredOrigin.protocol !== 'http:' && configuredOrigin.protocol !== 'https:') return false;
+      return originUrl.origin === configuredOrigin.origin;
+    }
+
     // The Node listener sees the internal HTTP hop when TLS terminates at a
     // reverse proxy. Use the public origin metadata that standard proxies
     // forward, while still requiring an exact scheme, host, and port match.
@@ -219,7 +234,6 @@ export function sameOrigin(request: Request): boolean {
     const forwardedProto = firstHeaderValue(request.headers.get('x-forwarded-proto'));
     const forwardedHost = firstHeaderValue(request.headers.get('x-forwarded-host'));
     if (forwardedProto && forwardedProto !== 'http' && forwardedProto !== 'https') return false;
-    const originUrl = new URL(origin);
     const requestOrigin = `${forwardedProto || requestUrl.protocol.slice(0, -1)}://${forwardedHost || request.headers.get('host') || requestUrl.host}`;
     const requestOriginUrl = new URL(requestOrigin);
     if (originUrl.origin === requestOriginUrl.origin) return true;
@@ -236,8 +250,34 @@ export function sameOrigin(request: Request): boolean {
   }
 }
 
-function withBaseHeaders(c: Context): void {
+function originDebugInfo(request: Request, publicOrigin?: string): Record<string, unknown> {
+  let origin = '<missing>';
+  try {
+    const value = request.headers.get('origin');
+    origin = value ? new URL(value).origin : origin;
+  } catch {
+    origin = '<invalid>';
+  }
+  let requestOrigin = '<invalid>';
+  try {
+    requestOrigin = new URL(request.url).origin;
+  } catch {
+    // The request URL should always be valid, but keep diagnostics fail-safe.
+  }
+  return {
+    upgrade: request.headers.get('upgrade')?.toLowerCase() === 'websocket',
+    origin,
+    requestOrigin,
+    host: request.headers.get('host') || '<missing>',
+    forwardedHost: firstHeaderValue(request.headers.get('x-forwarded-host')) || '<missing>',
+    forwardedProto: firstHeaderValue(request.headers.get('x-forwarded-proto')) || '<missing>',
+    configuredPublicOrigin: publicOrigin || '<unset>',
+  };
+}
+
+function withBaseHeaders(c: Context, buildId: string): void {
   for (const [name, value] of Object.entries(BASE_HEADERS)) c.header(name, value);
+  c.header('X-Shoplist-Build', buildId);
 }
 
 function json(c: Context, status: number, body: unknown, cache = 'no-store'): Response {
@@ -254,9 +294,12 @@ async function readJsonBody(c: Context): Promise<Record<string, unknown>> {
   return isRecord(parsed) ? parsed : {};
 }
 
-function sameOriginMiddleware() {
+function sameOriginMiddleware(publicOrigin?: string, originDebug = false) {
   return async (c: Context, next: Next): Promise<Response | void> => {
-    if (!sameOrigin(c.req.raw)) return json(c, 403, { error: 'bad origin' });
+    if (!sameOrigin(c.req.raw, publicOrigin)) {
+      if (originDebug) console.warn('[DEBUG-origin]', originDebugInfo(c.req.raw, publicOrigin));
+      return json(c, 403, { error: 'bad origin' });
+    }
     return next();
   };
 }
@@ -265,12 +308,15 @@ function sameOriginMiddleware() {
 export function createApp(options: AppOptions = {}): ShoplistApp {
   const dataFile = options.dataFile || path.join(process.env.DATA_DIR || path.join(SERVER_DIR, 'data'), 'db.sqlite');
   const publicDir = options.publicDir || process.env.PUBLIC_DIR || BUILT_DIR;
+  const publicOrigin = options.publicOrigin ?? process.env.PUBLIC_ORIGIN;
+  const buildId = safeBuildId(options.buildId ?? process.env.BUILD_SHA);
+  const originDebug = options.originDebug ?? process.env.ORIGIN_DEBUG === '1';
   const store = options.store || new Store(dataFile);
   const rooms: Rooms = new Map();
   const app = new Hono();
 
   app.use('*', async (c, next) => {
-    withBaseHeaders(c);
+    withBaseHeaders(c, buildId);
     return next();
   });
 
@@ -279,9 +325,9 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
     return json(c, 500, { error: 'internal error' });
   });
 
-  app.get('/healthz', (c) => json(c, 200, { ok: true, lists: store.listCount() }));
+  app.get('/healthz', (c) => json(c, 200, { ok: true, lists: store.listCount(), build: buildId }));
 
-  app.post('/api/lists', sameOriginMiddleware(), async (c) => {
+  app.post('/api/lists', sameOriginMiddleware(publicOrigin, originDebug), async (c) => {
     if (!/^application\/json/i.test(c.req.header('content-type') || '')) {
       return json(c, 415, { error: 'expected application/json' });
     }
@@ -331,7 +377,7 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
 
   app.get('/favicon.ico', (c) => c.redirect('/icons/favicon.svg', 302));
 
-  app.get('/ws', sameOriginMiddleware(), upgradeWebSocket((c) => {
+  app.get('/ws', sameOriginMiddleware(publicOrigin, originDebug), upgradeWebSocket((c) => {
     let connection: {
       listId: string;
       clientId: string;
@@ -461,7 +507,7 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
   app.on(['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], '*', (c) => json(c, 405, { error: 'method not allowed' }));
   app.notFound((c) => json(c, 404, { error: 'not found' }));
 
-  return { app, store, rooms };
+  return { app, store, rooms, buildId };
 }
 
 /** Start the one HTTP + WebSocket server used in production and development. */

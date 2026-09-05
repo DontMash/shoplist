@@ -78,6 +78,9 @@ pnpm start          # serves the Vite build on port 3000
 | `PORT`     | `3000`         | HTTP/WebSocket port              |
 | `HOST`     | `0.0.0.0`      | Bind address                     |
 | `DATA_DIR` | `./data`       | Directory where `db.sqlite` is stored |
+| `PUBLIC_ORIGIN` | unset       | Public HTTPS origin used for browser origin checks |
+| `BUILD_SHA` | `unknown`      | Build identifier exposed by `/healthz` and `X-Shoplist-Build` |
+| `ORIGIN_DEBUG` | unset      | Set to `1` temporarily to log rejected origin checks |
 
 ## How it works
 
@@ -118,13 +121,20 @@ pnpm start          # serves the Vite build on port 3000
 
 - Put the container behind a reverse proxy with **TLS** for remote use
   (clipboard, share sheet and QR scanning work best in secure contexts;
-  `localhost` is exempt). The proxy should preserve the public host and scheme
-  in `X-Forwarded-Host` and `X-Forwarded-Proto` (and overwrite client-supplied
-  values); the server uses them for same-origin checks after TLS termination.
-  For WebSocket upgrades, preserving the public `Host` is required if the proxy
-  omits the forwarded scheme. WebSockets pass through any standard proxy — just
-  make sure upgrade requests reach the app (default behavior on nginx, Caddy,
-  Traefik, Cloudflare).
+  `localhost` is exempt). Set `PUBLIC_ORIGIN` to the exact public origin when
+  proxy-generated scheme/host headers are not reliable. Otherwise, the proxy
+  should preserve the public host and scheme in `X-Forwarded-Host` and
+  `X-Forwarded-Proto` (and overwrite client-supplied values); the server uses
+  them for same-origin checks after TLS termination. For WebSocket upgrades,
+  preserving the public `Host` is required if the proxy omits the forwarded
+  scheme. WebSockets pass through any standard proxy — just make sure upgrade
+  requests reach the app (default behavior on nginx, Caddy, Traefik,
+  Cloudflare).
+- `/healthz` reports the configured build identifier and responses include the
+  same value in `X-Shoplist-Build`. Set `BUILD_SHA` during image builds so the
+  running image can be distinguished from its source branch. Set
+  `ORIGIN_DEBUG=1` only while diagnosing a deployment; it emits redacted
+  origin-check diagnostics for rejected API/WebSocket requests.
 - The app is designed to be served from the **domain root** (`/`).
 - To start over, delete the volume / `data/db.sqlite` (and any `.legacy-*` backup).
 

@@ -1,10 +1,16 @@
 services:
   shoplist:
-    build: .
+    build:
+      context: .
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     image: shoplist:latest
     container_name: shoplist
     environment:
       - PORT=3000
+      - BUILD_SHA=${BUILD_SHA:-unknown}
+      - PUBLIC_ORIGIN=${PUBLIC_ORIGIN:-}
+      - ORIGIN_DEBUG=${ORIGIN_DEBUG:-}
     volumes:
       - shoplist-data:/app/data
     restart: unless-stopped

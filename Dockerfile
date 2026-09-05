@@ -22,10 +22,12 @@ RUN pnpm --filter @shoplist/server deploy --prod --legacy /app/deploy
 
 # ---- runtime stage ----------------------------------------------------------
 FROM node:24-alpine
+ARG BUILD_SHA=unknown
 ENV NODE_ENV=production \
     PORT=3000 \
     DATA_DIR=/app/data \
-    PUBLIC_DIR=/app/public-dist
+    PUBLIC_DIR=/app/public-dist \
+    BUILD_SHA=${BUILD_SHA}
 
 WORKDIR /app
 
