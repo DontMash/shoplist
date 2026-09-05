@@ -384,25 +384,13 @@ describe('Hono API and realtime server', () => {
     const previousPublicDir = process.env.PUBLIC_DIR;
     process.env.DATA_DIR = dataDirectory;
     delete process.env.PUBLIC_DIR;
-    const resources = createApp({ buildId: 'debug-build', originDebug: true });
+    const resources = createApp();
     const tooLarge = await resources.app.request('/api/lists', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'content-length': '1' },
       body: 'x'.repeat(17 * 1024),
     });
     expect(tooLarge.status).toBe(413);
-    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const badOrigin = await resources.app.request('/api/lists', {
-      method: 'POST',
-      headers: { origin: 'https://evil.example' },
-    });
-    expect(badOrigin.status).toBe(403);
-    expect(warning).toHaveBeenCalledWith('[DEBUG-origin]', expect.objectContaining({
-      origin: 'https://evil.example',
-      upgrade: false,
-      configuredPublicOrigin: '<unset>',
-    }));
-    warning.mockRestore();
     const emptyBody = await resources.app.request('/api/lists', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

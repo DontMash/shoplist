@@ -10,7 +10,6 @@ services:
       - PORT=3000
       - BUILD_SHA=${BUILD_SHA:-unknown}
       - PUBLIC_ORIGIN=${PUBLIC_ORIGIN:-}
-      - ORIGIN_DEBUG=${ORIGIN_DEBUG:-}
     volumes:
       - shoplist-data:/app/data
     restart: unless-stopped

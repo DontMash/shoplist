@@ -44,7 +44,6 @@ export interface AppOptions {
   store?: Store;
   publicOrigin?: string;
   buildId?: string;
-  originDebug?: boolean;
 }
 
 export interface ShoplistApp {
@@ -250,31 +249,6 @@ export function sameOrigin(request: Request, publicOrigin?: string): boolean {
   }
 }
 
-function originDebugInfo(request: Request, publicOrigin?: string): Record<string, unknown> {
-  let origin = '<missing>';
-  try {
-    const value = request.headers.get('origin');
-    origin = value ? new URL(value).origin : origin;
-  } catch {
-    origin = '<invalid>';
-  }
-  let requestOrigin = '<invalid>';
-  try {
-    requestOrigin = new URL(request.url).origin;
-  } catch {
-    // The request URL should always be valid, but keep diagnostics fail-safe.
-  }
-  return {
-    upgrade: request.headers.get('upgrade')?.toLowerCase() === 'websocket',
-    origin,
-    requestOrigin,
-    host: request.headers.get('host') || '<missing>',
-    forwardedHost: firstHeaderValue(request.headers.get('x-forwarded-host')) || '<missing>',
-    forwardedProto: firstHeaderValue(request.headers.get('x-forwarded-proto')) || '<missing>',
-    configuredPublicOrigin: publicOrigin || '<unset>',
-  };
-}
-
 function withBaseHeaders(c: Context, buildId: string): void {
   for (const [name, value] of Object.entries(BASE_HEADERS)) c.header(name, value);
   c.header('X-Shoplist-Build', buildId);
@@ -294,12 +268,9 @@ async function readJsonBody(c: Context): Promise<Record<string, unknown>> {
   return isRecord(parsed) ? parsed : {};
 }
 
-function sameOriginMiddleware(publicOrigin?: string, originDebug = false) {
+function sameOriginMiddleware(publicOrigin?: string) {
   return async (c: Context, next: Next): Promise<Response | void> => {
-    if (!sameOrigin(c.req.raw, publicOrigin)) {
-      if (originDebug) console.warn('[DEBUG-origin]', originDebugInfo(c.req.raw, publicOrigin));
-      return json(c, 403, { error: 'bad origin' });
-    }
+    if (!sameOrigin(c.req.raw, publicOrigin)) return json(c, 403, { error: 'bad origin' });
     return next();
   };
 }
@@ -310,7 +281,6 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
   const publicDir = options.publicDir || process.env.PUBLIC_DIR || BUILT_DIR;
   const publicOrigin = options.publicOrigin ?? process.env.PUBLIC_ORIGIN;
   const buildId = safeBuildId(options.buildId ?? process.env.BUILD_SHA);
-  const originDebug = options.originDebug ?? process.env.ORIGIN_DEBUG === '1';
   const store = options.store || new Store(dataFile);
   const rooms: Rooms = new Map();
   const app = new Hono();
@@ -327,7 +297,7 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
 
   app.get('/healthz', (c) => json(c, 200, { ok: true, lists: store.listCount(), build: buildId }));
 
-  app.post('/api/lists', sameOriginMiddleware(publicOrigin, originDebug), async (c) => {
+  app.post('/api/lists', sameOriginMiddleware(publicOrigin), async (c) => {
     if (!/^application\/json/i.test(c.req.header('content-type') || '')) {
       return json(c, 415, { error: 'expected application/json' });
     }
@@ -377,7 +347,7 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
 
   app.get('/favicon.ico', (c) => c.redirect('/icons/favicon.svg', 302));
 
-  app.get('/ws', sameOriginMiddleware(publicOrigin, originDebug), upgradeWebSocket((c) => {
+  app.get('/ws', sameOriginMiddleware(publicOrigin), upgradeWebSocket((c) => {
     let connection: {
       listId: string;
       clientId: string;
