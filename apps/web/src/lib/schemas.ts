@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { extractListId } from './list';
 
+// Zod's default fast-path probes `new Function()` on first validation. The
+// production app intentionally uses a strict CSP without `unsafe-eval`, so
+// disable that optional JIT path before any schema can be parsed.
+z.config({ jitless: true });
+
 /**
  * Zod 4 implements Standard Schema, which TanStack Form v1 consumes directly.
  * Keeping these schemas in one module also mirrors the server's length limits.
