@@ -7,3 +7,6 @@ data/
 *.log
 .DS_Store
 .scratch
+.env
+.env.*
+!.env.example

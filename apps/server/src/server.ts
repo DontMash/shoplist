@@ -16,6 +16,7 @@ import {
   type OperationKind,
 } from './store.js';
 import type { WSContext } from 'hono/ws';
+import { loadServerEnv, type ServerEnv } from './env.js';
 
 const SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BUILT_DIR = path.resolve(SERVER_DIR, '../web/dist');
@@ -275,12 +276,11 @@ function sameOriginMiddleware(publicOrigin?: string) {
   };
 }
 
-/** Create the Hono application without opening a listening socket. */
-export function createApp(options: AppOptions = {}): ShoplistApp {
-  const dataFile = options.dataFile || path.join(process.env.DATA_DIR || path.join(SERVER_DIR, 'data'), 'db.sqlite');
-  const publicDir = options.publicDir || process.env.PUBLIC_DIR || BUILT_DIR;
-  const publicOrigin = options.publicOrigin ?? process.env.PUBLIC_ORIGIN;
-  const buildId = safeBuildId(options.buildId ?? process.env.BUILD_SHA);
+function createAppWithEnv(options: AppOptions, environment: ServerEnv): ShoplistApp {
+  const dataFile = options.dataFile || path.join(environment.DATA_DIR || path.join(SERVER_DIR, 'data'), 'db.sqlite');
+  const publicDir = options.publicDir || environment.PUBLIC_DIR || BUILT_DIR;
+  const publicOrigin = options.publicOrigin ?? environment.PUBLIC_ORIGIN;
+  const buildId = safeBuildId(options.buildId ?? environment.BUILD_SHA);
   const store = options.store || new Store(dataFile);
   const rooms: Rooms = new Map();
   const app = new Hono();
@@ -480,12 +480,18 @@ export function createApp(options: AppOptions = {}): ShoplistApp {
   return { app, store, rooms, buildId };
 }
 
+/** Create the Hono application without opening a listening socket. */
+export function createApp(options: AppOptions = {}): ShoplistApp {
+  return createAppWithEnv(options, loadServerEnv());
+}
+
 /** Start the one HTTP + WebSocket server used in production and development. */
 export function startServer(options: StartOptions = {}): RunningServer {
-  const resources = createApp(options);
+  const environment = loadServerEnv();
+  const resources = createAppWithEnv(options, environment);
   const websocketServer = new WebSocketServer({ noServer: true });
-  const port = options.port ?? (Number(process.env.PORT) || 3000);
-  const host = options.host || process.env.HOST || '0.0.0.0';
+  const port = options.port ?? environment.PORT;
+  const host = options.host || environment.HOST;
   const server = serve({
     fetch: resources.app.fetch,
     port,

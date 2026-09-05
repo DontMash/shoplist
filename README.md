@@ -64,9 +64,11 @@ pnpm dev:server                         # backend API + WebSocket on port 3000
 pnpm --filter @shoplist/web dev         # Vite frontend on http://localhost:5173
 ```
 
-Vite proxies `/api` and `/ws` to the backend during development. For a
-production-like local run, build the frontend first and then start the Node
-server:
+Vite proxies `/api` and `/ws` to the backend during development. The server
+loads a local `.env` file when present and validates the values with t3-env;
+shell, container, and CI environment values retain precedence over that file.
+For a production-like local run, build the frontend first and then start the
+Node server:
 
 ```bash
 pnpm build          # typechecks/compiles the server and builds the web app
@@ -78,6 +80,7 @@ pnpm start          # serves the Vite build on port 3000
 | `PORT`     | `3000`         | HTTP/WebSocket port              |
 | `HOST`     | `0.0.0.0`      | Bind address                     |
 | `DATA_DIR` | `./data`       | Directory where `db.sqlite` is stored |
+| `PUBLIC_DIR` | built frontend | Directory served for the PWA assets |
 | `PUBLIC_ORIGIN` | unset       | Public HTTPS origin used for browser origin checks |
 | `BUILD_SHA` | `unknown`      | Build identifier exposed by `/healthz` and `X-Shoplist-Build` |
 

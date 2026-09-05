@@ -15,11 +15,14 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
+    "@t3-oss/env-core": "^0.13.11",
     "better-sqlite3": "^13.0.3",
+    "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.13.5",
     "qrcode": "^1.5.4",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
