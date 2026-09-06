@@ -272,6 +272,16 @@ describe('list session', () => {
     expect(session.getSnapshot()).toMatchObject({ revision: 2, items: [{ id: 'rich' }] });
   });
 
+  it('notifies the server when a participant explicitly leaves', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ left: true }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const session = await sessionFor(new InMemoryListSessionTransport(snapshot()));
+    await session.leave();
+    expect(session.getStatus()).toBe('closed');
+    expect(fetchMock).toHaveBeenCalledWith('/api/lists/list/leave', expect.objectContaining({ method: 'POST' }));
+    vi.unstubAllGlobals();
+  });
+
   it('handles all list commands and terminal outcomes through the public interface', async () => {
     const transport = new InMemoryListSessionTransport(snapshot());
     const session = await sessionFor(transport);

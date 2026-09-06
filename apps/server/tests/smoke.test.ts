@@ -87,7 +87,18 @@ describe('Store', () => {
       operationId: 'op-empty-patch', kind: 'item:update', actorClientId: 'client-a', payload: { id: itemId, patch: {} },
     }).ack).toMatchObject({ status: 'rejected', reason: 'invalid-payload', revision: 2 });
     expect(store.applyOperation(list.id, {
+      operationId: 'op-bad-add-name', kind: 'item:add', actorClientId: 'client-a', payload: { name: 2 },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'invalid-payload', revision: 2 });
+    expect(store.applyOperation(list.id, {
       operationId: 'op-bad-add-amount', kind: 'item:add', actorClientId: 'client-a', payload: { name: 'Bad', amount: 2 },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'invalid-payload', revision: 2 });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-bad-update-name', kind: 'item:update', actorClientId: 'client-a',
+      payload: { id: itemId, patch: { name: 2 } },
+    }).ack).toMatchObject({ status: 'rejected', reason: 'invalid-payload', revision: 2 });
+    expect(store.applyOperation(list.id, {
+      operationId: 'op-bad-update-amount', kind: 'item:update', actorClientId: 'client-a',
+      payload: { id: itemId, patch: { amount: 2 } },
     }).ack).toMatchObject({ status: 'rejected', reason: 'invalid-payload', revision: 2 });
     expect(store.applyOperation(list.id, {
       operationId: 'op-bad-update-type', kind: 'item:update', actorClientId: 'client-a',
@@ -242,14 +253,36 @@ describe('Store', () => {
         updated_at INTEGER NOT NULL,
         by TEXT
       );
+      CREATE TABLE members (
+        list_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        color TEXT NOT NULL,
+        joined_at INTEGER NOT NULL,
+        PRIMARY KEY (list_id, client_id)
+      );
+      CREATE TABLE processed_operations (
+        list_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        response_json TEXT NOT NULL,
+        processed_at INTEGER NOT NULL,
+        PRIMARY KEY (list_id, operation_id)
+      );
       INSERT INTO lists (id, name, owner_token, created_at) VALUES ('legacy', 'Legacy', 'owner', 1);
       INSERT INTO items (id, list_id, name, created_at, updated_at, by)
         VALUES ('item', 'legacy', 'Bread', 1, 1, 'client-a');
+      INSERT INTO members (list_id, client_id, name, color, joined_at)
+        VALUES ('legacy', 'client-a', 'Alice', '#123456', 1);
+      INSERT INTO processed_operations (list_id, operation_id, status, revision, response_json, processed_at)
+        VALUES ('legacy', 'old-operation', 'accepted', 0, '{}', 1);
     `);
     sqlite.close();
 
     const store = new Store(file);
     expect(store.getList('legacy')?.items[0]).toMatchObject({ name: 'Bread', by: 'client-a', lastEditedBy: null });
+    expect(store.getList('legacy')?.members['client-a']).toMatchObject({ name: 'Alice', leftAt: null });
     store.close();
     await rm(directory, { recursive: true, force: true });
   });

@@ -19,6 +19,9 @@ export function loadServerEnv(runtimeEnv: NodeJS.ProcessEnv = process.env) {
       DATA_DIR: z.string().min(1).optional(),
       PUBLIC_DIR: z.string().min(1).optional(),
       PUBLIC_ORIGIN: z.string().url().optional(),
+      VAPID_PUBLIC_KEY: z.string().min(1).optional(),
+      VAPID_PRIVATE_KEY: z.string().min(1).optional(),
+      VAPID_SUBJECT: z.string().min(1).optional(),
       BUILD_SHA: z.string().default('unknown'),
     },
     // Pass a copy because emptyStringAsUndefined intentionally removes empty

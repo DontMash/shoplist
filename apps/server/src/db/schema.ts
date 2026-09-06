@@ -43,5 +43,17 @@ export const members = sqliteTable('members', {
   name: text('name').notNull(),
   color: text('color').notNull(),
   joinedAt: integer('joined_at').notNull(),
+  leftAt: integer('left_at'),
+}, (table) => [primaryKey({ columns: [table.listId, table.clientId] })]);
+
+export const pushDestinations = sqliteTable('push_destinations', {
+  listId: text('list_id').notNull().references(() => lists.id, { onDelete: 'cascade' }),
+  clientId: text('client_id').notNull(),
+  endpoint: text('endpoint').notNull(),
+  p256dh: text('p256dh').notNull(),
+  auth: text('auth').notNull(),
+  muted: integer('muted', { mode: 'boolean' }).notNull().default(false),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
 }, (table) => [primaryKey({ columns: [table.listId, table.clientId] })]);
 

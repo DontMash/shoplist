@@ -19,6 +19,11 @@ export default defineConfig({
       registerType: 'autoUpdate',
       // Registration lives in src/main.tsx via `virtual:pwa-register`.
       injectRegister: null,
+      // Use a source service worker so it can handle Web Push events as well
+      // as the existing app-shell caching responsibilities.
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'service-worker.ts',
       // public/ files (incl. manifest icons) are already precached via the
       // globPatterns below — don't add them a second time.
       includeManifestIcons: false,
@@ -38,26 +43,10 @@ export default defineConfig({
           { src: '/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
-      workbox: {
+      injectManifest: {
         // Precache the whole app shell, including files copied from public/
-        // (icons). Stable names like app.js are handled via workbox revision
-        // hashes. The generated manifest.webmanifest is
-        // added by the plugin itself.
+        // (icons). Stable names like app.js are handled via Workbox revisions.
         globPatterns: ['**/*.{js,css,html,svg,png}'],
-        // Serve the precached shell for offline navigations. The app uses
-        // wouter's hash router, so every route resolves to the same index.html.
-        navigateFallback: '/index.html',
-        // Never answer API requests with the app shell.
-        navigateFallbackDenylist: [/^\/api\//],
-        // Realtime API stays network-only; the QR endpoint caches well.
-        runtimeCaching: [
-          {
-            urlPattern: /\/api\/qr/,
-            handler: 'StaleWhileRevalidate',
-            options: { cacheableResponse: { statuses: [200] } },
-          },
-        ],
-        cleanupOutdatedCaches: true,
       },
       // No service worker during development so /api and /ws proxies stay clean.
       devOptions: { enabled: false },

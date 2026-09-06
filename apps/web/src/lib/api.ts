@@ -39,6 +39,8 @@ const createListResponseSchema = z.object({
   ownerToken: z.string(),
 });
 
+const leaveListResponseSchema = z.object({ left: z.boolean() });
+
 export type ListResponse = z.infer<typeof listResponseSchema>;
 export type CreateListResponse = z.infer<typeof createListResponseSchema>;
 export type ListResponseItem = ListResponse['items'][number];
@@ -77,6 +79,15 @@ export async function createList(name: string): Promise<CreateListResponse> {
     body: JSON.stringify({ name }),
   });
   return readResponse(response, createListResponseSchema);
+}
+
+export async function leaveList(listId: string, clientId: string): Promise<boolean> {
+  const response = await fetch(`/api/lists/${encodeURIComponent(listId)}/leave`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ clientId }),
+  });
+  return (await readResponse(response, leaveListResponseSchema)).left;
 }
 
 /** Normalize a websocket full-state message into the same shape as REST data. */

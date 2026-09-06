@@ -5,6 +5,7 @@ import SQLiteDatabase from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { and, eq } from 'drizzle-orm';
 import * as schema from './db/schema.js';
+import type { NotificationEvent } from './notifications.js';
 
 export type ItemId = string;
 
@@ -26,6 +27,21 @@ export interface Member {
   name: string;
   color: string;
   joinedAt: number;
+  leftAt: number | null;
+}
+
+export interface PushSubscription {
+  endpoint: string;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
+}
+
+export interface PushDestination extends PushSubscription {
+  listId: string;
+  clientId: string;
+  muted: boolean;
 }
 
 export interface ShoppingList {
@@ -58,6 +74,7 @@ export interface StoreOperation {
   kind: OperationKind;
   payload: Record<string, unknown>;
   actorClientId: string | null;
+  actorName?: string;
 }
 
 export interface OperationAck {
@@ -79,6 +96,8 @@ export interface OperationResult {
   list: ShoppingList | null;
   duplicate: boolean;
   terminal: boolean;
+  notification?: NotificationEvent;
+  notificationRecipients?: PushDestination[];
 }
 
 /**
@@ -185,6 +204,7 @@ export class Store {
         name: row.name,
         color: row.color,
         joinedAt: row.joinedAt,
+        leftAt: row.leftAt ?? null,
       };
       membersByList.set(row.listId, listMembers);
     }
@@ -289,8 +309,9 @@ export class Store {
     list.clearedAt = clearedAt;
   }
 
-  public touchMember(list: ShoppingList, clientId: string, name: string, color: string): void {
+  public touchMember(list: ShoppingList, clientId: string, name: string, color: string): { joined: boolean } {
     const existing = list.members[clientId];
+    const joined = !existing || existing.leftAt !== null;
     const cleanName = cleanText(name, 40) || 'Guest';
     const member = {
       listId: list.id,
@@ -298,13 +319,14 @@ export class Store {
       name: cleanName,
       color,
       joinedAt: existing?.joinedAt || Date.now(),
+      leftAt: null,
     };
 
     this.db.insert(schema.members)
       .values(member)
       .onConflictDoUpdate({
         target: [schema.members.listId, schema.members.clientId],
-        set: { name: member.name, color: member.color },
+        set: { name: member.name, color: member.color, leftAt: null },
       })
       .run();
     list.members[clientId] = {
@@ -312,11 +334,106 @@ export class Store {
       name: member.name,
       color: member.color,
       joinedAt: member.joinedAt,
+      leftAt: null,
     };
+    return { joined };
+  }
+
+  public leaveMember(listId: string, clientId: string): boolean {
+    const list = this.data.lists[listId];
+    const member = list?.members[clientId];
+    if (!member || member.leftAt !== null) return false;
+    const leftAt = Date.now();
+    const result = this.db.update(schema.members)
+      .set({ leftAt })
+      .where(and(eq(schema.members.listId, listId), eq(schema.members.clientId, clientId)))
+      .run();
+    if (result.changes === 0) return false;
+    member.leftAt = leftAt;
+    return true;
   }
 
   public memberCount(list: ShoppingList): number {
     return Object.keys(list.members || {}).length;
+  }
+
+  public getNotificationStatus(listId: string, clientId: string): { enabled: boolean; muted: boolean } {
+    const member = this.data.lists[listId]?.members[clientId];
+    if (!member || member.leftAt !== null) return { enabled: false, muted: false };
+    const destination = this.db.select().from(schema.pushDestinations)
+      .where(and(eq(schema.pushDestinations.listId, listId), eq(schema.pushDestinations.clientId, clientId)))
+      .get();
+    return { enabled: Boolean(destination), muted: Boolean(destination?.muted) };
+  }
+
+  public registerPushDestination(listId: string, clientId: string, subscription: PushSubscription): boolean {
+    const member = this.data.lists[listId]?.members[clientId];
+    if (!member || member.leftAt !== null) return false;
+    const now = Date.now();
+    this.db.insert(schema.pushDestinations).values({
+      listId,
+      clientId,
+      endpoint: subscription.endpoint,
+      p256dh: subscription.keys.p256dh,
+      auth: subscription.keys.auth,
+      createdAt: now,
+      updatedAt: now,
+    }).onConflictDoUpdate({
+      target: [schema.pushDestinations.listId, schema.pushDestinations.clientId],
+      set: {
+        endpoint: subscription.endpoint,
+        p256dh: subscription.keys.p256dh,
+        auth: subscription.keys.auth,
+        updatedAt: now,
+      },
+    }).run();
+    return true;
+  }
+
+  public setNotificationsMuted(listId: string, clientId: string, muted: boolean): boolean {
+    const result = this.db.update(schema.pushDestinations)
+      .set({ muted, updatedAt: Date.now() })
+      .where(and(eq(schema.pushDestinations.listId, listId), eq(schema.pushDestinations.clientId, clientId)))
+      .run();
+    return result.changes > 0;
+  }
+
+  public getNotificationRecipients(listId: string, onlineClientIds: Set<string>): PushDestination[] {
+    const list = this.data.lists[listId];
+    if (!list) return [];
+    const destinations = this.db.select().from(schema.pushDestinations)
+      .where(eq(schema.pushDestinations.listId, listId)).all();
+    return destinations
+      .filter((destination) => {
+        const member = list.members[destination.clientId];
+        return Boolean(member && member.leftAt === null && !destination.muted && !onlineClientIds.has(destination.clientId));
+      })
+      .map((destination) => ({
+        listId: destination.listId,
+        clientId: destination.clientId,
+        endpoint: destination.endpoint,
+        keys: { p256dh: destination.p256dh, auth: destination.auth },
+        muted: Boolean(destination.muted),
+      }));
+  }
+
+  public disableNotifications(listId: string, clientId: string): boolean {
+    const result = this.db.delete(schema.pushDestinations)
+      .where(and(
+        eq(schema.pushDestinations.listId, listId),
+        eq(schema.pushDestinations.clientId, clientId),
+      )).run();
+    return result.changes > 0;
+  }
+
+  public removePushDestination(listId: string, clientId: string, endpoint: string): boolean {
+    const result = this.db.delete(schema.pushDestinations)
+      .where(and(
+        eq(schema.pushDestinations.listId, listId),
+        eq(schema.pushDestinations.clientId, clientId),
+        eq(schema.pushDestinations.endpoint, endpoint),
+      )).run();
+    return result.changes > 0;
   }
 
   // ------------------------------------------------------------- items
@@ -414,6 +531,8 @@ export class Store {
         };
       }
     }
+    const deletionRecipients = current && operation.kind === 'list:delete'
+      ? this.getNotificationRecipients(listId, new Set()) : undefined;
     if (!operationId || operationId.length > 160) {
       const safeOperation = { ...operation, operationId } as StoreOperation;
       const ack = rejected(safeOperation, current?.revision ?? 0, 'operation-too-large', 'The operation ID is invalid.');
@@ -456,6 +575,7 @@ export class Store {
       let deletedItemId: string | null = null;
       let clearAt: number | null = null;
       let renamedTo: string | null = null;
+      let notification: NotificationEvent | undefined;
 
       if (!list) {
         ack = {
@@ -627,6 +747,18 @@ export class Store {
       if (list && accepted && operation.kind !== 'list:clear' && operation.kind !== 'list:rename' && operation.kind !== 'list:delete') {
         tx.update(schema.lists).set({ revision: revision + 1 }).where(eq(schema.lists.id, listId)).run();
       }
+      if (list && accepted) {
+        const kind = operation.kind === 'list:clear' ? 'clear'
+          : operation.kind === 'list:rename' ? 'rename'
+            : operation.kind === 'list:delete' ? 'delete' : 'changed';
+        notification = {
+          listId,
+          listName: renamedTo || list.name,
+          actorClientId: operation.actorClientId || '',
+          actorName: cleanText(operation.actorName, 40) || 'Someone',
+          kind,
+        };
+      }
       tx.insert(schema.processedOperations).values({
         listId,
         operationId: operation.operationId,
@@ -636,7 +768,7 @@ export class Store {
         terminal,
         processedAt: now,
       }).run();
-      return { ack, accepted, terminal, changedItem, deletedItemId, clearAt, renamedTo };
+      return { ack, accepted, terminal, changedItem, deletedItemId, clearAt, renamedTo, notification, notificationRecipients: deletionRecipients };
     });
 
     // Only update the compatibility projection after the transaction commits.
@@ -663,6 +795,8 @@ export class Store {
       list: this.getList(listId),
       duplicate: false,
       terminal: result.terminal,
+      notification: result.notification,
+      notificationRecipients: result.notificationRecipients,
     };
   }
 
@@ -699,6 +833,18 @@ export class Store {
         name TEXT NOT NULL,
         color TEXT NOT NULL,
         joined_at INTEGER NOT NULL,
+        left_at INTEGER,
+        PRIMARY KEY (list_id, client_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS push_destinations (
+        list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+        client_id TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        p256dh TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        muted INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
         PRIMARY KEY (list_id, client_id)
       )`,
       `CREATE TABLE IF NOT EXISTS processed_operations (
@@ -724,6 +870,10 @@ export class Store {
     const itemColumns = this.sqlite.prepare('PRAGMA table_info(items)').all() as Array<{ name: string }>;
     if (!itemColumns.some((column) => column.name === 'last_edited_by')) {
       this.sqlite.exec('ALTER TABLE items ADD COLUMN last_edited_by TEXT');
+    }
+    const memberColumns = this.sqlite.prepare('PRAGMA table_info(members)').all() as Array<{ name: string }>;
+    if (!memberColumns.some((column) => column.name === 'left_at')) {
+      this.sqlite.exec('ALTER TABLE members ADD COLUMN left_at INTEGER');
     }
     const processedColumns = this.sqlite.prepare('PRAGMA table_info(processed_operations)').all() as Array<{ name: string }>;
     if (!processedColumns.some((column) => column.name === 'terminal')) {

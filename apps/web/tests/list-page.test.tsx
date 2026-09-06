@@ -95,4 +95,21 @@ describe('list page boundary', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(screen.queryByDisplayValue('Milk')).not.toBeInTheDocument());
   });
+
+  it('mutes notifications from the list menu', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/notifications')) {
+        return Promise.resolve({ ok: true, json: async () => init?.method === 'PATCH'
+          ? { enabled: true, muted: true, available: true }
+          : { enabled: true, muted: false, available: true } });
+      }
+      return Promise.resolve({ ok: true, json: async () => snapshot });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderList();
+    expect(await screen.findByDisplayValue('Milk')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'List options' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Mute notifications' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/lists/list-1/notifications', expect.objectContaining({ method: 'PATCH' })));
+  });
 });

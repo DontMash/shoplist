@@ -16,6 +16,7 @@ import {
   type OperationKind,
 } from './store.js';
 import type { WSContext } from 'hono/ws';
+import { NotificationDispatcher, onlineClientIds, WebPushSender, type NotificationEvent, type PushSender } from './notifications.js';
 import { loadServerEnv, type ServerEnv } from './env.js';
 
 const SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -45,6 +46,9 @@ export interface AppOptions {
   store?: Store;
   publicOrigin?: string;
   buildId?: string;
+  pushPublicKey?: string;
+  pushSender?: PushSender;
+  notificationCoalesceMs?: number;
 }
 
 export interface ShoplistApp {
@@ -52,8 +56,8 @@ export interface ShoplistApp {
   store: Store;
   rooms: Rooms;
   buildId: string;
+  dispatcher: NotificationDispatcher;
 }
-
 interface ClientInfo {
   clientId: string;
   name: string;
@@ -173,7 +177,7 @@ const OPERATION_KINDS: OperationKind[] = [
 ];
 
 /** Convert both the current compact wire format and the generic envelope. */
-function operationFromMessage(message: Record<string, unknown>, clientId: string): StoreOperation | null {
+function operationFromMessage(message: Record<string, unknown>, clientId: string, actorName = 'Someone'): StoreOperation | null {
   const operationId = typeof message.opId === 'string'
     ? message.opId
     : typeof message.operationId === 'string' ? message.operationId : '';
@@ -209,7 +213,7 @@ function operationFromMessage(message: Record<string, unknown>, clientId: string
     }
   }
   if (!kind) return null;
-  return { operationId, kind, payload, actorClientId: clientId };
+  return { operationId, kind, payload, actorClientId: clientId, actorName };
 }
 
 export function messageText(data: unknown): string {
@@ -278,6 +282,26 @@ async function readJsonBody(c: Context): Promise<Record<string, unknown>> {
   return isRecord(parsed) ? parsed : {};
 }
 
+function requestClientId(value: unknown): string | null {
+  const clientId = cleanText(value, 64);
+  return clientId || null;
+}
+
+function requestSubscription(value: unknown): { endpoint: string; keys: { p256dh: string; auth: string } } | null {
+  if (!isRecord(value) || typeof value.endpoint !== 'string' || !isRecord(value.keys)) return null;
+  const endpoint = value.endpoint.trim();
+  const p256dh = typeof value.keys.p256dh === 'string' ? value.keys.p256dh.trim() : '';
+  const auth = typeof value.keys.auth === 'string' ? value.keys.auth.trim() : '';
+  if (!endpoint || endpoint.length > 2048 || !p256dh || p256dh.length > 512 || !auth || auth.length > 512) return null;
+  try {
+    const parsed = new URL(endpoint);
+    if (parsed.protocol !== 'https:') return null;
+  } catch {
+    return null;
+  }
+  return { endpoint, keys: { p256dh, auth } };
+}
+
 function sameOriginMiddleware(publicOrigin?: string) {
   return async (c: Context, next: Next): Promise<Response | void> => {
     if (!sameOrigin(c.req.raw, publicOrigin)) return json(c, 403, { error: 'bad origin' });
@@ -292,6 +316,16 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
   const buildId = safeBuildId(options.buildId ?? environment.BUILD_SHA);
   const store = options.store || new Store(dataFile);
   const rooms: Rooms = new Map();
+  const configuredPushPublicKey = options.pushPublicKey ?? environment.VAPID_PUBLIC_KEY ?? '';
+  const pushSender = options.pushSender || (
+    environment.VAPID_PUBLIC_KEY && environment.VAPID_PRIVATE_KEY && environment.VAPID_SUBJECT
+      ? new WebPushSender(environment.VAPID_PUBLIC_KEY, environment.VAPID_PRIVATE_KEY, environment.VAPID_SUBJECT)
+      : undefined
+  );
+  const pushPublicKey = pushSender ? configuredPushPublicKey : '';
+  const dispatcher = new NotificationDispatcher(store, pushSender, (listId) => onlineClientIds(rooms, listId), {
+    coalesceMs: options.notificationCoalesceMs,
+  });
   const app = new Hono();
 
   app.use('*', async (c, next) => {
@@ -335,6 +369,61 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
       members: publicMembers(list),
       memberCount: store.memberCount(list),
     });
+  });
+
+  app.get('/api/push/config', (c) => json(c, 200, { publicKey: pushPublicKey || null }));
+
+  app.get('/api/lists/:id/notifications', (c) => {
+    const id = c.req.param('id') || '';
+    if (!LIST_ID.test(id) || !store.getList(id)) return json(c, 404, { error: 'list not found' });
+    const clientId = requestClientId(c.req.query('client'));
+    if (!clientId) return json(c, 400, { error: 'client id required' });
+    return json(c, 200, { ...store.getNotificationStatus(id, clientId), available: Boolean(pushSender && pushPublicKey) });
+  });
+
+  app.put('/api/lists/:id/notifications', sameOriginMiddleware(publicOrigin), async (c) => {
+    const id = c.req.param('id') || '';
+    if (!LIST_ID.test(id) || !store.getList(id)) return json(c, 404, { error: 'list not found' });
+    if (!/^application\/json/i.test(c.req.header('content-type') || '')) return json(c, 415, { error: 'expected application/json' });
+    let body: Record<string, unknown>;
+    try { body = await readJsonBody(c); } catch { return json(c, 400, { error: 'invalid json' }); }
+    const clientId = requestClientId(body.clientId);
+    const subscription = requestSubscription(body.subscription);
+    if (!clientId || !subscription) return json(c, 400, { error: 'invalid notification subscription' });
+    if (!store.registerPushDestination(id, clientId, subscription)) return json(c, 409, { error: 'participant is not active' });
+    return json(c, 200, { ...store.getNotificationStatus(id, clientId), available: Boolean(pushSender && pushPublicKey) });
+  });
+
+  app.patch('/api/lists/:id/notifications', sameOriginMiddleware(publicOrigin), async (c) => {
+    const id = c.req.param('id') || '';
+    if (!LIST_ID.test(id) || !store.getList(id)) return json(c, 404, { error: 'list not found' });
+    if (!/^application\/json/i.test(c.req.header('content-type') || '')) return json(c, 415, { error: 'expected application/json' });
+    let body: Record<string, unknown>;
+    try { body = await readJsonBody(c); } catch { return json(c, 400, { error: 'invalid json' }); }
+    const clientId = requestClientId(body.clientId);
+    if (!clientId || typeof body.muted !== 'boolean') return json(c, 400, { error: 'invalid notification preference' });
+    if (!store.setNotificationsMuted(id, clientId, body.muted)) return json(c, 404, { error: 'notifications are not enabled' });
+    return json(c, 200, { ...store.getNotificationStatus(id, clientId), available: Boolean(pushSender && pushPublicKey) });
+  });
+
+  app.delete('/api/lists/:id/notifications', sameOriginMiddleware(publicOrigin), (c) => {
+    const id = c.req.param('id') || '';
+    if (!LIST_ID.test(id) || !store.getList(id)) return json(c, 404, { error: 'list not found' });
+    const clientId = requestClientId(c.req.query('client'));
+    if (!clientId) return json(c, 400, { error: 'client id required' });
+    store.disableNotifications(id, clientId);
+    return json(c, 200, { ...store.getNotificationStatus(id, clientId), available: Boolean(pushSender && pushPublicKey) });
+  });
+
+  app.post('/api/lists/:id/leave', sameOriginMiddleware(publicOrigin), async (c) => {
+    const id = c.req.param('id') || '';
+    if (!LIST_ID.test(id) || !store.getList(id)) return json(c, 404, { error: 'list not found' });
+    if (!/^application\/json/i.test(c.req.header('content-type') || '')) return json(c, 415, { error: 'expected application/json' });
+    let body: Record<string, unknown>;
+    try { body = await readJsonBody(c); } catch { return json(c, 400, { error: 'invalid json' }); }
+    const clientId = requestClientId(body.clientId);
+    if (!clientId) return json(c, 400, { error: 'client id required' });
+    return json(c, 200, { left: store.leaveMember(id, clientId) });
   });
 
   app.get('/api/qr', async (c) => {
@@ -385,7 +474,7 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
         }
         room.set(socket, info);
         connection = { listId: list.id, clientId, name, info, socket };
-        store.touchMember(list, clientId, name, info.color);
+        const membership = store.touchMember(list, clientId, name, info.color);
 
         socket.send(JSON.stringify({
           t: 'init',
@@ -394,6 +483,16 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
           online: onlineIn(rooms, list.id),
         }));
         pushPresence(rooms, list.id, publicMembers(list));
+        if (membership.joined) {
+          const event: NotificationEvent = {
+            listId: list.id,
+            listName: list.name,
+            actorClientId: clientId,
+            actorName: name,
+            kind: 'join',
+          };
+          void dispatcher.dispatch(event);
+        }
       },
 
       onMessage(event, socket) {
@@ -417,11 +516,12 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
           return;
         }
 
-        const operation = operationFromMessage(message, connection.clientId);
+        const operation = operationFromMessage(message, connection.clientId, connection.name);
         if (operation) {
           const result = store.applyOperation(connection.listId, operation);
           socket.send(JSON.stringify(result.ack));
           if (result.duplicate) return;
+          if (result.notification) void dispatcher.dispatch(result.notification, result.notificationRecipients);
           if (result.terminal) {
             closeDeletedRoom(rooms, connection.listId);
           } else if (result.ack.status === 'accepted' && result.list) {
@@ -437,8 +537,10 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
             kind: (typeof message.kind === 'string' ? message.kind : '') as OperationKind,
             payload: isRecord(message.payload) ? message.payload : {},
             actorClientId: connection.clientId,
+            actorName: connection.name,
           });
           socket.send(JSON.stringify(result.ack));
+          if (result.notification) void dispatcher.dispatch(result.notification, result.notificationRecipients);
           return;
         }
 
@@ -452,9 +554,10 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
           socket.send(JSON.stringify({ t: 'error', message: 'Only the list owner can delete it.' }));
           return;
         }
-        const legacy = operationFromMessage({ ...message, opId: `legacy-${rid(9)}` }, connection.clientId);
+        const legacy = operationFromMessage({ ...message, opId: `legacy-${rid(9)}` }, connection.clientId, connection.name);
         if (!legacy) return;
         const result = store.applyOperation(connection.listId, legacy);
+        if (result.notification) void dispatcher.dispatch(result.notification, result.notificationRecipients);
         if (result.terminal) {
           closeDeletedRoom(rooms, connection.listId);
         } else if (result.ack.status === 'accepted' && result.list) {
@@ -490,7 +593,7 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
   app.on(['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], '*', (c) => json(c, 405, { error: 'method not allowed' }));
   app.notFound((c) => json(c, 404, { error: 'not found' }));
 
-  return { app, store, rooms, buildId };
+  return { app, store, rooms, buildId, dispatcher };
 }
 
 /** Create the Hono application without opening a listening socket. */
@@ -519,6 +622,7 @@ export function startServer(options: StartOptions = {}): RunningServer {
   const close = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    resources.dispatcher.dispose();
     resources.store.flushSync();
     for (const room of resources.rooms.values()) {
       for (const socket of room.keys()) {

@@ -26,6 +26,7 @@ with **Docker**.
   The list creator additionally gets an owner token that allows **deleting**
   a list permanently.
 - **Presence** — see who else is currently in the list (colored initials).
+- **List activity notifications** — opt in to privacy-safe browser push alerts for joins and accepted list changes, with per-list mute controls.
 - **Swipe gestures** — React item rows support horizontal swipe actions for
   collecting or deleting; vertical movement remains page scroll.
 - **Mobile-first PWA** — installable to the home screen (Android/iOS),
@@ -82,6 +83,9 @@ pnpm start          # serves the Vite build on port 3000
 | `DATA_DIR` | `./data`       | Directory where `db.sqlite` is stored |
 | `PUBLIC_DIR` | built frontend | Directory served for the PWA assets |
 | `PUBLIC_ORIGIN` | unset       | Public HTTPS origin used for browser origin checks |
+| `VAPID_PUBLIC_KEY` | unset      | Public Web Push application key |
+| `VAPID_PRIVATE_KEY` | unset     | Private Web Push application key |
+| `VAPID_SUBJECT` | unset       | VAPID contact URI, for example `mailto:admin@example.com` |
 | `BUILD_SHA` | `unknown`      | Build identifier exposed by `/healthz` and `X-Shoplist-Build` |
 
 ## How it works
@@ -136,6 +140,16 @@ pnpm start          # serves the Vite build on port 3000
   same value in `X-Shoplist-Build`. Set `BUILD_SHA` during image builds so the
   running image can be distinguished from its source branch.
 - The app is designed to be served from the **domain root** (`/`).
+- To enable list activity push notifications, generate one VAPID key pair and keep
+  it stable for the lifetime of the installation:
+
+  ```bash
+  pnpm --filter @shoplist/server exec web-push generate-vapid-keys
+  ```
+
+  Set the resulting public and private keys as `VAPID_PUBLIC_KEY` and
+  `VAPID_PRIVATE_KEY`, and set `VAPID_SUBJECT` to a contact URI. Push delivery is
+  otherwise unavailable, but realtime list synchronization continues to work.
 - To start over, delete the volume / `data/db.sqlite` (and any `.legacy-*` backup).
 
 ## Testing

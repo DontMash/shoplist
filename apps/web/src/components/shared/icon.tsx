@@ -1,6 +1,8 @@
 import type { ComponentProps } from 'react';
 import {
   IconArrowsSort,
+  IconBell,
+  IconBellOff,
   IconCheck,
   IconChevronLeft,
   IconCircleX,
@@ -26,6 +28,8 @@ export const ICONS = {
   clear: IconCircleX,
   leave: IconLogout,
   sort: IconArrowsSort,
+  bell: IconBell,
+  'bell-off': IconBellOff,
   cart: IconShoppingCart,
 } as const;
 

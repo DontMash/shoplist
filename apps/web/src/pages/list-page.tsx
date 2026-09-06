@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { useLiveQuery } from '@tanstack/react-db';
 import { useQueryClient } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
@@ -16,6 +16,7 @@ import { useParticipantStore } from '../stores/participant-store';
 import { useSavedListsStore } from '../stores/saved-lists-store';
 import { notify } from '../components/notification-toaster';
 import { getListSessionCollection, createListSession, type SessionStatus } from '../lib/list-session';
+import { getNotificationStatus, enableNotifications, muteNotifications, unmuteNotifications, type NotificationStatus } from '../lib/push-notifications';
 import { listQueryKey } from '../lib/api';
 import { initials, sortItems, type ListItem, type ListPreferences } from '../lib/list';
 import { itemSchema } from '../lib/schemas';
@@ -71,6 +72,7 @@ export function ListPage({ id }: { id: string }) {
   const addNameRef = useRef<HTMLInputElement>(null);
   const terminalHandled = useRef(false);
   const outcomeHandled = useRef<string | null>(null);
+  const [notificationStatus, setNotificationStatus] = useState<NotificationStatus | null>(null);
 
   const session = useMemo(() => createListSession({
     listId: id,
@@ -123,10 +125,46 @@ export function ListPage({ id }: { id: string }) {
     replaceLists((previous) => previous.map((item) => item.id === id && item.name !== listName
       ? { ...item, name: listName } : item));
   }, [id, replaceLists, sessionState.list?.name]);
+  useEffect(() => {
+    if (sessionState.status !== 'live') return;
+    let active = true;
+    void getNotificationStatus(id, identity.clientId)
+      .then((status) => {
+        if (!active) return;
+        setNotificationStatus(status);
+      })
+      .catch(() => {
+        if (active) setNotificationStatus(null);
+      });
+    return () => { active = false; };
+  }, [id, identity.clientId, sessionState.status]);
 
   const items = useMemo(() => sortItems(list?.items || [], preferences), [list, preferences]);
   const memberNames = useMemo(() => new Map(sessionState.members.map((member) => [member.clientId, member.name])), [sessionState.members]);
   const updatePreferences = (next: ListPreferences) => setPreferences(id, next);
+  const applyNotificationStatus = (status: NotificationStatus) => {
+    setNotificationStatus(status);
+  };
+  const notificationAction = notificationStatus?.enabled
+    ? {
+        icon: notificationStatus.muted ? 'bell' as const : 'bell-off' as const,
+        label: notificationStatus.muted ? 'Unmute notifications' : 'Mute notifications',
+        onSelect: () => {
+          void (notificationStatus.muted ? unmuteNotifications(id, identity.clientId) : muteNotifications(id, identity.clientId))
+            .then(applyNotificationStatus)
+            .catch((error: unknown) => notify(error instanceof Error ? error.message : 'Could not update notifications.'));
+        },
+      }
+    : {
+        icon: 'bell' as const,
+        label: 'Enable notifications',
+        onSelect: () => {
+          void enableNotifications(id, identity.clientId)
+            .then(applyNotificationStatus)
+            .then(() => notify('Notifications enabled for this list.'))
+            .catch((error: unknown) => notify(error instanceof Error ? error.message : 'Could not enable notifications.'));
+        },
+      };
   const askDelete = (item: ListItem) => openConfirm({
     title: 'Delete item?',
     body: `Delete “${item.name}”? This cannot be undone.`,
@@ -151,6 +189,7 @@ export function ListPage({ id }: { id: string }) {
       actions: [
         { icon: 'share', label: 'Invite people…', onSelect: () => openShare({ list }) },
         { icon: 'sort', label: 'Sort and group items…', onSelect: () => openSort({ preferences, onApply: updatePreferences }) },
+        notificationAction,
         { icon: 'edit', label: 'Rename list', onSelect: () => openPrompt({
           title: 'Rename list',
           label: 'Choose a name people will recognize.',
@@ -184,7 +223,15 @@ export function ListPage({ id }: { id: string }) {
           body: 'It stays available to everyone else, and you can rejoin anytime with the invite link.',
           confirmLabel: 'Leave',
           danger: true,
-          onConfirm: () => { session.close(); forgetList(); navigate('/'); },
+          onConfirm: async () => {
+            try {
+              await session.leave();
+              forgetList();
+              navigate('/');
+            } catch {
+              notify('Could not leave this list. Check your connection and try again.');
+            }
+          },
         }) },
       ],
     });

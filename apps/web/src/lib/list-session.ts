@@ -1,6 +1,6 @@
 import { createCollection, type Collection, type NonSingleResult } from '@tanstack/db';
 import type { QueryClient } from '@tanstack/react-query';
-import { listQueryKey, type ListResponse, type ListResponseItem } from './api';
+import { leaveList, listQueryKey, type ListResponse, type ListResponseItem } from './api';
 import { uid, type ListItem, type ListParticipant } from './list';
 import {
   browserListSessionTransport,
@@ -209,6 +209,7 @@ export interface ListSession {
   subscribe(listener: () => void): () => void;
   start(): void;
   close(): void;
+  leave(): Promise<boolean>;
   kick(): void;
   addItem(input: { name: string; amount?: string }): string;
   updateItem(itemId: string, patch: ItemUpdate): string | null;
@@ -335,6 +336,13 @@ class ListSessionImpl implements ListSession {
     this.connection = null;
     this.setStatus('closed');
     void this.collection.cleanup();
+  }
+
+  public async leave(): Promise<boolean> {
+    if (this.closed) return false;
+    const left = await leaveList(this.listId, this.clientId);
+    this.close();
+    return left;
   }
 
   public kick(): void {
