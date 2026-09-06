@@ -7,11 +7,11 @@ import {
 } from '../src/lib/list-session';
 import { InMemoryListSessionTransport } from '../src/lib/test-transport';
 import { ApiError, createList, fetchList, responseFromSocket } from '../src/lib/api';
-import type { ListResponse } from '../src/lib/api';
+import type { ListResponse, ListResponseItem } from '../src/lib/api';
 
 const openSessions: ListSession[] = [];
 
-const item = (id: string, name = 'Milk') => ({
+const item = (id: string, name = 'Milk'): ListResponseItem => ({
   id, name, amount: '', collected: false, createdAt: 1, updatedAt: 1,
 });
 
@@ -80,7 +80,7 @@ describe('list session', () => {
     const session = await sessionFor(transport);
     const temporaryId = session.addItem({ name: 'Eggs', amount: '6' });
     expect(session.getSnapshot().items).toHaveLength(1);
-    expect(session.getSnapshot().items[0].id).toBe(temporaryId);
+    expect(session.getSnapshot().items[0]).toMatchObject({ id: temporaryId, by: 'client-a', lastEditedBy: 'client-a' });
     const add = sent(transport, 'item:add')!;
 
     const editId = session.updateItem(temporaryId, { name: 'Free range eggs' });
@@ -94,8 +94,8 @@ describe('list session', () => {
     const edit = sent(transport, 'item:update')!;
     expect(edit.payload.id).toBe('server-item');
     transport.deliverAck({ opId: edit.operationId, status: 'accepted', revision: 2 });
-    transport.deliverSnapshot(snapshot([{ ...item('server-item', 'Free range eggs'), amount: '6' }], 2));
-    expect(session.getSnapshot()).toMatchObject({ pending: false, revision: 2 });
+    transport.deliverSnapshot(snapshot([{ ...item('server-item', 'Free range eggs'), amount: '6', lastEditedBy: 'client-a' }], 2));
+    expect(session.getSnapshot()).toMatchObject({ pending: false, revision: 2, items: [{ lastEditedBy: 'client-a' }] });
   });
 
   it('coalesces queued fields and rolls back only a rejected operation', async () => {
@@ -240,8 +240,15 @@ describe('list session', () => {
     transport.deliver({ t: 'presence', online: 'not an array' });
     expect(session.getSnapshot().online).toHaveLength(1);
 
-    transport.deliver({ t: 'state', list: { id: 'list', name: 'Rich', createdAt: 2, revision: 2, items: [{ id: 'rich', name: 'Rich', amount: '1', collected: true, createdAt: 2, updatedAt: 3, by: 'client-b' }] } });
-    expect(session.getSnapshot().items[0]).toMatchObject({ id: 'rich', by: 'client-b' });
+    transport.deliver({ t: 'state', list: {
+      id: 'list', name: 'Rich', createdAt: 2, revision: 2,
+      items: [{ id: 'rich', name: 'Rich', amount: '1', collected: true, createdAt: 2, updatedAt: 3, by: 'client-b', lastEditedBy: 'client-b' }],
+      members: [{ clientId: 'client-a', name: 'Alice', color: '#123' }, { clientId: 'client-b', name: 'Bob', color: '#456' }],
+    } });
+    expect(session.getSnapshot().items[0]).toMatchObject({ id: 'rich', by: 'client-b', lastEditedBy: 'client-b' });
+    expect(session.getSnapshot().members).toEqual(expect.arrayContaining([
+      expect.objectContaining({ clientId: 'client-b', name: 'Bob' }),
+    ]));
     transport.deliver({ t: 'presence', online: [null] });
     expect(session.getSnapshot().online).toHaveLength(1);
 
@@ -250,6 +257,7 @@ describe('list session', () => {
       { id: 'bad', name: 'bad', amount: 1 }, { id: 'bad', name: 'bad', collected: 1 },
       { id: 'bad', name: 'bad', createdAt: 'bad' }, { id: 'bad', name: 'bad', updatedAt: 'bad' },
       { id: 'bad', name: 'bad', by: 1 },
+      { id: 'bad', name: 'bad', lastEditedBy: 1 },
     ];
     invalidItems.forEach((invalid, index) => transport.deliver({
       t: 'state', list: { id: 'list', name: 'Bad', createdAt: 1, revision: 3 + index, items: [invalid] },
@@ -307,10 +315,14 @@ describe('list session', () => {
     }) as typeof fetch;
     await expect(fetchList('list')).resolves.toMatchObject({ list: { revision: 0 } });
     await expect(createList('Created')).resolves.toMatchObject({ ownerToken: 'owner' });
-    const normalized = responseFromSocket({ id: 'list', name: 'Socket', createdAt: 1, items: [], revision: 4 }, {
-      ...snapshot(), memberCount: 2,
+    const normalized = responseFromSocket({
+      id: 'list', name: 'Socket', createdAt: 1, items: [], revision: 4,
+      members: [{ clientId: 'client-b', name: 'Bob', color: '#123' }],
+    }, { ...snapshot(), memberCount: 2 });
+    expect(normalized).toMatchObject({
+      list: { name: 'Socket', revision: 4 }, memberCount: 2,
+      members: [{ clientId: 'client-b', name: 'Bob' }],
     });
-    expect(normalized).toMatchObject({ list: { name: 'Socket', revision: 4 }, memberCount: 2 });
     globalThis.fetch = (async () => new Response('nope', { status: 404 })) as typeof fetch;
     await expect(fetchList('missing')).rejects.toMatchObject({ status: 404 });
     globalThis.fetch = (async () => new Response('{', { status: 200 })) as typeof fetch;

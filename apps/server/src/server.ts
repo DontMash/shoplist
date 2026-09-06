@@ -88,12 +88,16 @@ export function colorFor(clientId: string): string {
   return PALETTE[hash % PALETTE.length];
 }
 
-export function publicItem(item: ShoppingItem): Omit<ShoppingItem, 'by'> & { by?: string | null } {
+export function publicItem(item: ShoppingItem): ShoppingItem {
   // Do not leak a removed legacy status even if a database is inspected before
   // its migration save runs.
-  const copy = { ...item } as Omit<ShoppingItem, 'by'> & { by?: string | null; shopped?: unknown };
+  const copy = { ...item } as ShoppingItem & { shopped?: unknown };
   delete copy.shopped;
   return copy;
+}
+
+function publicMembers(list: ShoppingList): ClientInfo[] {
+  return Object.values(list.members).map(({ clientId, name, color }) => ({ clientId, name, color }));
 }
 
 function listPayload(list: ShoppingList) {
@@ -103,6 +107,7 @@ function listPayload(list: ShoppingList) {
     createdAt: list.createdAt,
     revision: list.revision,
     items: list.items.map(publicItem),
+    members: publicMembers(list),
   };
 }
 
@@ -143,8 +148,12 @@ function pushState(rooms: Rooms, list: ShoppingList, actor?: ClientInfo): void {
   });
 }
 
-function pushPresence(rooms: Rooms, listId: string): void {
-  broadcast(rooms, listId, { t: 'presence', online: onlineIn(rooms, listId) });
+function pushPresence(rooms: Rooms, listId: string, members: ClientInfo[] = []): void {
+  broadcast(rooms, listId, {
+    t: 'presence',
+    online: onlineIn(rooms, listId),
+    members,
+  });
 }
 
 function closeDeletedRoom(rooms: Rooms, listId: string): void {
@@ -323,6 +332,7 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
     return json(c, 200, {
       list: { id: list.id, name: list.name, createdAt: list.createdAt, revision: list.revision },
       items: list.items.map(publicItem),
+      members: publicMembers(list),
       memberCount: store.memberCount(list),
     });
   });
@@ -383,7 +393,7 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
           list: listPayload(list),
           online: onlineIn(rooms, list.id),
         }));
-        pushPresence(rooms, list.id);
+        pushPresence(rooms, list.id, publicMembers(list));
       },
 
       onMessage(event, socket) {
@@ -458,7 +468,10 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
         if (!room) return;
         room.delete(connection.socket);
         if (room.size === 0) rooms.delete(connection.listId);
-        else pushPresence(rooms, connection.listId);
+        else {
+          const list = store.getList(connection.listId);
+          pushPresence(rooms, connection.listId, list ? publicMembers(list) : []);
+        }
         connection = null;
       },
 

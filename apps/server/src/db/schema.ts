@@ -34,6 +34,7 @@ export const items = sqliteTable('items', {
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
   by: text('by'),
+  lastEditedBy: text('last_edited_by'),
 });
 
 export const members = sqliteTable('members', {

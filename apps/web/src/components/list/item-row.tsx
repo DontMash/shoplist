@@ -16,6 +16,7 @@ interface ItemRowProps {
   item: ListItem;
   session: ListSession;
   askDelete: (item: ListItem) => void;
+  editorName?: string;
 }
 
 type EditableField = 'name' | 'amount';
@@ -23,7 +24,7 @@ type EditableField = 'name' | 'amount';
 type PendingValues = Record<EditableField, string | null>;
 type Timers = Record<EditableField, ReturnType<typeof setTimeout> | undefined>;
 
-export function ItemRow({ item, session, askDelete }: ItemRowProps) {
+export function ItemRow({ item, session, askDelete, editorName }: ItemRowProps) {
   const [offset, setOffset] = useState(0);
   const [swiping, setSwiping] = useState(false);
   const rowRef = useRef<HTMLLIElement>(null);
@@ -162,6 +163,7 @@ export function ItemRow({ item, session, askDelete }: ItemRowProps) {
           </div>
           <div className="item-row2">
             <button type="button" className="chip chip-collected" aria-pressed={!!item.collected} onClick={collect}><Icon name="check" /><span>Collected</span></button>
+            {editorName && <span className="item-editor-badge">{editorName}</span>}
             <span className="spacer" />
             <Button type="button" variant="ghost" size="icon" className="icon-btn item-del" aria-label="Delete item" onClick={remove}><Icon name="trash" /></Button>
           </div>

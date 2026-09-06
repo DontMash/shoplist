@@ -1,7 +1,7 @@
 import { createCollection, type Collection, type NonSingleResult } from '@tanstack/db';
 import type { QueryClient } from '@tanstack/react-query';
 import { listQueryKey, type ListResponse, type ListResponseItem } from './api';
-import { uid, type ListItem } from './list';
+import { uid, type ListItem, type ListParticipant } from './list';
 import {
   browserListSessionTransport,
   type ClientOperation,
@@ -30,11 +30,7 @@ export type RejectionReason =
   | 'outbox-full'
   | string;
 
-export interface SessionParticipant {
-  clientId: string;
-  name: string;
-  color: string;
-}
+export type SessionParticipant = ListParticipant;
 
 export interface AcceptedOperationOutcome {
   kind: 'accepted';
@@ -68,6 +64,7 @@ export interface ListSessionSnapshot {
   pendingCount: number;
   outcome: OperationOutcome | null;
   online: SessionParticipant[];
+  members: SessionParticipant[];
 }
 
 export interface ItemUpdate {
@@ -80,6 +77,7 @@ interface BaseState {
   list: { id: string; name: string; createdAt: number };
   items: ListItem[];
   revision: number;
+  members: SessionParticipant[];
 }
 
 interface PendingOperation extends ClientOperation {
@@ -107,7 +105,7 @@ interface AckMessage {
 
 interface SnapshotMessage {
   t: 'init' | 'state';
-  list: { id: string; name: string; createdAt: number; revision?: number; items: ListResponseItem[] };
+  list: { id: string; name: string; createdAt: number; revision?: number; items: ListResponseItem[]; members?: SessionParticipant[] };
   online?: SessionParticipant[];
 }
 
@@ -145,6 +143,7 @@ function normalizeItem(value: unknown): ListItem | null {
   if (value.createdAt !== undefined && (typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt))) return null;
   if (value.updatedAt !== undefined && (typeof value.updatedAt !== 'number' || !Number.isFinite(value.updatedAt))) return null;
   if (value.by !== undefined && value.by !== null && typeof value.by !== 'string') return null;
+  if (value.lastEditedBy !== undefined && value.lastEditedBy !== null && typeof value.lastEditedBy !== 'string') return null;
   const amount = value.amount as string | undefined;
   const collected = value.collected as boolean | undefined;
   return {
@@ -155,7 +154,13 @@ function normalizeItem(value: unknown): ListItem | null {
     ...(value.createdAt === undefined ? {} : { createdAt: value.createdAt as number }),
     ...(value.updatedAt === undefined ? {} : { updatedAt: value.updatedAt as number }),
     ...(value.by === undefined ? {} : { by: value.by as string | null }),
+    ...(value.lastEditedBy === undefined ? {} : { lastEditedBy: value.lastEditedBy as string | null }),
   };
+}
+
+function normalizeMembers(value: unknown): SessionParticipant[] | null {
+  if (value === undefined) return [];
+  return normalizeOnline(value);
 }
 
 function normalizeBase(id: string, response: unknown): BaseState | null {
@@ -167,11 +172,13 @@ function normalizeBase(id: string, response: unknown): BaseState | null {
   const revision = list.revision === undefined ? 0 : list.revision;
   if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0) return null;
   const items = response.items.map(normalizeItem);
-  if (items.some((item) => item === null)) return null;
+  const members = normalizeMembers(response.members);
+  if (items.some((item) => item === null) || members === null) return null;
   return {
     list: { id: list.id, name: list.name, createdAt: list.createdAt },
     items: items as ListItem[],
     revision,
+    members,
   };
 }
 
@@ -347,7 +354,7 @@ class ListSessionImpl implements ListSession {
       payload: { tempItemId, name: input.name, amount: input.amount || '' },
       state: 'queued',
     });
-    this.optimisticInsert({ id: tempItemId, name: input.name, amount: input.amount || '', collected: false, createdAt: Date.now(), updatedAt: Date.now(), by: this.clientId });
+    this.optimisticInsert({ id: tempItemId, name: input.name, amount: input.amount || '', collected: false, createdAt: Date.now(), updatedAt: Date.now(), by: this.clientId, lastEditedBy: this.clientId });
     this.reconcile();
     this.pump();
     return tempItemId;
@@ -482,6 +489,7 @@ class ListSessionImpl implements ListSession {
         this.acceptSnapshot({
           list: incoming.list as SnapshotMessage['list'],
           items: incoming.list.items as ListResponseItem[],
+          members: incoming.list.members,
           memberCount: this.queryClient?.getQueryData<ListResponse>(listQueryKey(this.listId))?.memberCount,
         });
       }
@@ -495,6 +503,13 @@ class ListSessionImpl implements ListSession {
     if (message.t === 'presence') {
       const online = normalizeOnline(message.online);
       if (online) this.online = online;
+      if ('members' in message) {
+        const members = normalizeMembers(message.members);
+        if (members && this.base) {
+          this.base = { ...this.base, members };
+          this.updateQueryCache(this.base);
+        }
+      }
       this.refreshSnapshot();
       return;
     }
@@ -521,7 +536,7 @@ class ListSessionImpl implements ListSession {
     this.base = incoming;
     this.retireAcknowledged();
     this.reconcile();
-    this.updateQueryCache(incoming);
+    this.updateQueryCache(this.base);
     this.pump();
   }
 
@@ -676,7 +691,7 @@ class ListSessionImpl implements ListSession {
           const item = operation.serverItem || {
             id: operation.serverItemId || operation.tempItemId || String(operation.payload.tempItemId),
             name: String(operation.payload.name || ''), amount: String(operation.payload.amount || ''),
-            collected: false, createdAt: Date.now(), updatedAt: Date.now(), by: this.clientId,
+            collected: false, createdAt: Date.now(), updatedAt: Date.now(), by: this.clientId, lastEditedBy: this.clientId,
           };
           items.set(item.id, cloneItem(item));
           break;
@@ -718,6 +733,7 @@ class ListSessionImpl implements ListSession {
       pendingCount: this.pendingOperations.length,
       outcome: this.outcome,
       online: this.online,
+      members: this.base?.members || [],
     };
   }
 
@@ -748,6 +764,7 @@ class ListSessionImpl implements ListSession {
     this.queryClient.setQueryData<ListResponse>(key, {
       list: { ...base.list, revision: base.revision },
       items: base.items.map((item) => ({ ...item, amount: item.amount || '', collected: Boolean(item.collected) })),
+      members: base.members,
       memberCount: previous?.memberCount,
     });
   }

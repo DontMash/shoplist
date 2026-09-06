@@ -125,6 +125,7 @@ export function ListPage({ id }: { id: string }) {
   }, [id, replaceLists, sessionState.list?.name]);
 
   const items = useMemo(() => sortItems(list?.items || [], preferences), [list, preferences]);
+  const memberNames = useMemo(() => new Map(sessionState.members.map((member) => [member.clientId, member.name])), [sessionState.members]);
   const updatePreferences = (next: ListPreferences) => setPreferences(id, next);
   const askDelete = (item: ListItem) => openConfirm({
     title: 'Delete item?',
@@ -225,7 +226,13 @@ export function ListPage({ id }: { id: string }) {
         <span className={cn('dot', sessionDotClass(sessionState.status))} aria-hidden="true" />
         <Button type="button" variant="ghost" size="icon" className="icon-btn" aria-label="List options" onClick={openListMenu}><Icon name="dots" /></Button>
       </header>
-      <ul className="items">{items.map((item) => <ItemRow key={item.id} item={item} session={session} askDelete={askDelete} />)}</ul>
+      <ul className="items">{items.map((item) => <ItemRow
+        key={item.id}
+        item={item}
+        session={session}
+        askDelete={askDelete}
+        editorName={item.lastEditedBy ? memberNames.get(item.lastEditedBy) : undefined}
+      />)}</ul>
       {!list.items.length && <div className="empty list-empty show"><div className="big"><Icon name="cart" /></div><p>Nothing here yet.</p><p className="muted">Add your first item with the bar below.</p></div>}
       <form className="addbar" onSubmit={(event) => { event.preventDefault(); void addForm.handleSubmit(); }}>
         <FieldGroup className="contents">

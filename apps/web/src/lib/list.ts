@@ -17,6 +17,13 @@ export interface ListItem {
   createdAt?: number;
   updatedAt?: number;
   by?: string | null;
+  lastEditedBy?: string | null;
+}
+
+export interface ListParticipant {
+  clientId: string;
+  name: string;
+  color: string;
 }
 
 export interface ListPreferences {

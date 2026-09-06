@@ -308,6 +308,21 @@ h1, h2, h3, p { margin: 0; }
 }
 
 .item-row2 { display: flex; align-items: center; gap: 8px; }
+.item-editor-badge {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: var(--chipbg);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
 .spacer { flex: 1; }
 
 .chip {

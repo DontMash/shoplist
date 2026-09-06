@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { access, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import SQLiteDatabase from 'better-sqlite3';
 import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
@@ -23,17 +24,32 @@ describe('Store', () => {
     const list = store.createList('  Weekend groceries  ');
     expect(list.name).toBe('Weekend groceries');
     expect(store.addItem(list, { name: ' Milk ', amount: '2 L' }, 'client-a')).toMatchObject({
-      name: 'Milk', amount: '2 L', collected: false, by: 'client-a',
+      name: 'Milk', amount: '2 L', collected: false, by: 'client-a', lastEditedBy: 'client-a',
     });
     expect(store.addItem(list, { name: '  ' }, 'client-a')).toBeNull();
     const item = list.items[0];
-    expect(store.updateItem(list, item.id, { collected: true, amount: '3 L' })).toBe(true);
-    expect(item).toMatchObject({ collected: true, amount: '3 L' });
+    expect(store.updateItem(list, item.id, { collected: true, amount: '3 L' }, 'client-b')).toBe(true);
+    expect(item).toMatchObject({ collected: true, amount: '3 L', lastEditedBy: 'client-b' });
     expect(store.updateItem(list, item.id, { name: ' ' })).toBe(false);
     expect(store.deleteItem(list, item.id)).toBe(true);
     expect(store.deleteItem(list, item.id)).toBe(false);
     expect(store.deleteList(list.id)).toBe(true);
     expect(store.getList(list.id)).toBeNull();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it('leaves the last editor unchanged for actorless compatibility updates', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-actorless-'));
+    const store = new Store(path.join(directory, 'db.sqlite'));
+    const list = store.createList('Actorless updates');
+    const item = store.addItem(list, { name: 'Milk' }, 'client-a')!;
+    const result = store.applyOperation(list.id, {
+      operationId: 'actorless-update', kind: 'item:update', actorClientId: null,
+      payload: { id: item.id, patch: { collected: true } },
+    });
+    expect(result.ack.status).toBe('accepted');
+    expect(list.items[0]).toMatchObject({ collected: true, lastEditedBy: 'client-a' });
     store.close();
     await rm(directory, { recursive: true, force: true });
   });
@@ -61,6 +77,7 @@ describe('Store', () => {
       operationId: 'op-update', kind: 'item:update', actorClientId: 'client-a',
       payload: { id: itemId, patch: { amount: '3 L', collected: true } },
     }).ack).toMatchObject({ status: 'accepted', revision: 2 });
+    expect(store.getList(list.id)?.items[0]).toMatchObject({ lastEditedBy: 'client-a' });
     expect(store.applyOperation(list.id, {
       operationId: 'op-reject', kind: 'item:update', actorClientId: 'client-a',
       payload: { id: itemId, patch: { name: ' ' } },
@@ -169,7 +186,7 @@ describe('Store', () => {
     expect(store.updateItem(list, item!.id, {
       name: '  Whole-grain bread  ', amount: '1 loaf', collected: 1,
     })).toBe(true);
-    expect(item).toMatchObject({ name: 'Whole-grain bread', amount: '1 loaf', collected: true });
+    expect(item).toMatchObject({ name: 'Whole-grain bread', amount: '1 loaf', collected: true, lastEditedBy: null });
     expect(store.updateItem(list, item!.id, { name: ' ' })).toBe(false);
     expect(store.deleteItem(list, 'missing')).toBe(false);
 
@@ -203,6 +220,40 @@ describe('Store', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it('migrates an existing SQLite database with no last-editor column', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-sqlite-migration-'));
+    const file = path.join(directory, 'db.sqlite');
+    const sqlite = new SQLiteDatabase(file);
+    sqlite.exec(`
+      CREATE TABLE lists (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        owner_token TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        cleared_at INTEGER
+      );
+      CREATE TABLE items (
+        id TEXT PRIMARY KEY NOT NULL,
+        list_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        amount TEXT NOT NULL DEFAULT '',
+        collected INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        by TEXT
+      );
+      INSERT INTO lists (id, name, owner_token, created_at) VALUES ('legacy', 'Legacy', 'owner', 1);
+      INSERT INTO items (id, list_id, name, created_at, updated_at, by)
+        VALUES ('item', 'legacy', 'Bread', 1, 1, 'client-a');
+    `);
+    sqlite.close();
+
+    const store = new Store(file);
+    expect(store.getList('legacy')?.items[0]).toMatchObject({ name: 'Bread', by: 'client-a', lastEditedBy: null });
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it('imports malformed legacy records without trusting their shape', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-malformed-'));
     const file = path.join(directory, 'db.json');
@@ -229,7 +280,7 @@ describe('Store', () => {
     const list = store.getList('fallback');
     expect(list).toMatchObject({ name: 'Shopping list', ownerToken: expect.any(String) });
     expect(list?.items).toHaveLength(1);
-    expect(list?.items[0]).toMatchObject({ name: 'Valid', collected: true, by: null });
+    expect(list?.items[0]).toMatchObject({ name: 'Valid', collected: true, by: null, lastEditedBy: null });
     expect(list?.members).toEqual({
       fallback: expect.objectContaining({ name: 'Guest', color: '#888888' }),
     });
@@ -341,7 +392,7 @@ describe('server helpers', () => {
     broadcast(rooms, 'room', { t: 'state' }, undefined);
     expect(firstSocket.send).toHaveBeenCalledTimes(1);
 
-    const item = { id: 'item', name: 'Item', amount: '', collected: false, createdAt: 1, updatedAt: 1, by: null,
+    const item = { id: 'item', name: 'Item', amount: '', collected: false, createdAt: 1, updatedAt: 1, by: null, lastEditedBy: null,
       shopped: true };
     expect(publicItem(item)).not.toHaveProperty('shopped');
   });
@@ -467,7 +518,7 @@ describe('Hono API and realtime server', () => {
 
     const listResponse = await fetch(`${base}/api/lists/${created.list.id}`);
     expect(listResponse.status).toBe(200);
-    expect(await listResponse.json()).toMatchObject({ list: { id: created.list.id }, items: [], memberCount: 0 });
+    expect(await listResponse.json()).toMatchObject({ list: { id: created.list.id }, items: [], members: [], memberCount: 0 });
     expect((await fetch(`${base}/api/lists/bad`)).status).toBe(404);
     expect((await fetch(`${base}/api/lists/not-a-list`)).status).toBe(404);
 
@@ -545,7 +596,7 @@ describe('Hono API and realtime server', () => {
       name: '  Free range eggs ', amount: '6', collected: true,
     } }));
     const updateState = await waitFor(clientB.messages, (message) => message.t === 'state' && message.list.items[0]?.collected);
-    expect(updateState.list.items[0]).toMatchObject({ name: 'Free range eggs', amount: '6', collected: true });
+    expect(updateState.list.items[0]).toMatchObject({ name: 'Free range eggs', amount: '6', collected: true, lastEditedBy: 'guest' });
     clientA.socket.send(JSON.stringify({ t: 'item:update', id: itemId, patch: { name: ' ' } }));
     clientA.socket.send(JSON.stringify({ t: 'list:rename', name: ' ' }));
     clientA.socket.send(JSON.stringify({ t: 'list:rename', name: 'Renamed operations' }));
@@ -647,7 +698,7 @@ describe('Hono API and realtime server', () => {
 
     clientA.socket.send(JSON.stringify({ t: 'item:add', item: { name: 'Milk', amount: '2 L' } }));
     const state = await waitFor(clientB.messages, (message) => message.t === 'state' && message.list.items.length === 1);
-    expect(state.list.items[0]).toMatchObject({ name: 'Milk', amount: '2 L' });
+    expect(state.list.items[0]).toMatchObject({ name: 'Milk', amount: '2 L', lastEditedBy: 'a' });
     const itemId = state.list.items[0].id as string;
 
     clientB.socket.send(JSON.stringify({ t: 'item:update', id: itemId, patch: { collected: true } }));

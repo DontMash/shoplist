@@ -10,7 +10,8 @@ import { useSavedListsStore } from '../src/stores/saved-lists-store';
 
 const snapshot = {
   list: { id: 'list-1', name: 'Groceries', createdAt: 1, revision: 0 },
-  items: [{ id: 'item-1', name: 'Milk', amount: '2', collected: false, createdAt: 1 }],
+  items: [{ id: 'item-1', name: 'Milk', amount: '2', collected: false, createdAt: 1, lastEditedBy: 'client-test' }],
+  members: [{ clientId: 'client-test', name: 'Alex', color: '#123456' }],
   memberCount: 1,
 };
 
@@ -74,6 +75,11 @@ describe('list page boundary', () => {
     if (!breadRow) throw new Error('Bread row is missing');
     fireEvent.click(within(breadRow).getByRole('button', { name: 'Collected' }));
     await waitFor(() => expect(within(breadRow).getByRole('button', { name: 'Collected' })).toHaveAttribute('aria-pressed', 'true'));
+  });
+
+  it('renders the item editor as a name-only badge', async () => {
+    renderList();
+    expect(await screen.findByText('Alex')).toHaveClass('item-editor-badge');
   });
 
   it('keeps the add action aligned with the input row', async () => {

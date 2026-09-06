@@ -1,4 +1,4 @@
-import { render, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ItemRow } from '../src/components/list/item-row';
 import type { ListSession } from '../src/lib/list-session';
@@ -50,5 +50,17 @@ describe('item touch interaction boundary', () => {
     render(<ItemRow item={item} session={session} askDelete={vi.fn()} />);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(interactMock).not.toHaveBeenCalled();
+  });
+
+  it('shows the editor name as a name-only badge when attribution resolves', () => {
+    setPointerCapability(false);
+    render(<ItemRow item={item} session={session} askDelete={vi.fn()} editorName="Alice" />);
+    expect(screen.getByText('Alice')).toHaveClass('item-editor-badge');
+  });
+
+  it('omits the badge when attribution is unavailable', () => {
+    setPointerCapability(false);
+    render(<ItemRow item={item} session={session} askDelete={vi.fn()} />);
+    expect(document.querySelector('.item-editor-badge')).not.toBeInTheDocument();
   });
 });

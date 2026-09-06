@@ -8,6 +8,13 @@ const itemResponseSchema = z.object({
   createdAt: z.number().optional(),
   updatedAt: z.number().optional(),
   by: z.string().nullable().optional(),
+  lastEditedBy: z.string().nullable().optional(),
+});
+
+const memberResponseSchema = z.object({
+  clientId: z.string(),
+  name: z.string(),
+  color: z.string(),
 });
 
 const listResponseSchema = z.object({
@@ -18,6 +25,7 @@ const listResponseSchema = z.object({
     revision: z.number().int().nonnegative().default(0),
   }),
   items: z.array(itemResponseSchema),
+  members: z.array(memberResponseSchema).optional(),
   memberCount: z.number().int().nonnegative().optional(),
 });
 
@@ -34,6 +42,7 @@ const createListResponseSchema = z.object({
 export type ListResponse = z.infer<typeof listResponseSchema>;
 export type CreateListResponse = z.infer<typeof createListResponseSchema>;
 export type ListResponseItem = ListResponse['items'][number];
+export type ListResponseMember = z.infer<typeof memberResponseSchema>;
 
 /** Errors retain the HTTP status so query consumers can distinguish 404s. */
 export class ApiError extends Error {
@@ -72,7 +81,7 @@ export async function createList(name: string): Promise<CreateListResponse> {
 
 /** Normalize a websocket full-state message into the same shape as REST data. */
 export function responseFromSocket(
-  message: { id: string; name: string; createdAt: number; revision?: number; items: ListResponseItem[] },
+  message: { id: string; name: string; createdAt: number; revision?: number; items: ListResponseItem[]; members?: ListResponseMember[] },
   previous?: ListResponse,
 ): ListResponse {
   return {
@@ -83,6 +92,7 @@ export function responseFromSocket(
       revision: message.revision ?? previous?.list.revision ?? 0,
     },
     items: message.items,
+    members: message.members ?? previous?.members,
     memberCount: previous?.memberCount,
   };
 }

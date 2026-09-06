@@ -15,7 +15,10 @@ export interface ShoppingItem {
   collected: boolean;
   createdAt: number;
   updatedAt: number;
+  /** The participant who created the item. */
   by: string | null;
+  /** The participant whose accepted mutation was most recent. */
+  lastEditedBy: string | null;
 }
 
 export interface Member {
@@ -170,6 +173,7 @@ export class Store {
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
         by: row.by ?? null,
+        lastEditedBy: row.lastEditedBy ?? null,
       });
       itemsByList.set(row.listId, listItems);
     }
@@ -329,6 +333,7 @@ export class Store {
       createdAt: now,
       updatedAt: now,
       by: by || null,
+      lastEditedBy: by || null,
     };
 
     this.db.insert(schema.items).values({
@@ -340,12 +345,13 @@ export class Store {
       createdAt: item.createdAt,
       updatedAt: item.updatedAt,
       by: item.by,
+      lastEditedBy: item.lastEditedBy,
     }).run();
     list.items.push(item);
     return item;
   }
 
-  public updateItem(list: ShoppingList, itemId: string, patch: ItemPatch): boolean {
+  public updateItem(list: ShoppingList, itemId: string, patch: ItemPatch, actorClientId: string | null = null): boolean {
     const item = list.items.find((candidate) => candidate.id === itemId);
     if (!item) return false;
 
@@ -357,6 +363,8 @@ export class Store {
     }
     if (patch.amount !== undefined) values.amount = cleanText(patch.amount, 40);
     if (patch.collected !== undefined) values.collected = Boolean(patch.collected);
+    if (Object.keys(values).length === 1) return false;
+    if (actorClientId) values.lastEditedBy = actorClientId;
 
     const result = this.db.update(schema.items)
       .set(values)
@@ -368,6 +376,7 @@ export class Store {
     if (values.amount !== undefined) item.amount = values.amount;
     if (values.collected !== undefined) item.collected = values.collected;
     item.updatedAt = values.updatedAt as number;
+    if (values.lastEditedBy !== undefined) item.lastEditedBy = values.lastEditedBy;
     return true;
   }
 
@@ -479,12 +488,13 @@ export class Store {
               createdAt: now,
               updatedAt: now,
               by: operation.actorClientId || null,
+              lastEditedBy: operation.actorClientId || null,
             };
             const nextRevision = revision + 1;
             tx.insert(schema.items).values({
               id: item.id, listId, name: item.name, amount: item.amount,
               collected: item.collected, createdAt: item.createdAt,
-              updatedAt: item.updatedAt, by: item.by,
+              updatedAt: item.updatedAt, by: item.by, lastEditedBy: item.lastEditedBy,
             }).run();
             ack = {
               t: 'ack', opId: operation.operationId, status: 'accepted',
@@ -538,12 +548,14 @@ export class Store {
               ack = rejected(operation, revision, 'invalid-payload', 'No item fields were supplied.');
               break;
             }
+            if (operation.actorClientId) values.lastEditedBy = operation.actorClientId;
             tx.update(schema.items).set(values)
               .where(and(eq(schema.items.id, item.id), eq(schema.items.listId, listId))).run();
             changedItem = { ...item };
             if (values.name !== undefined) changedItem.name = values.name;
             if (values.amount !== undefined) changedItem.amount = values.amount;
             if (values.collected !== undefined) changedItem.collected = values.collected;
+            if (values.lastEditedBy !== undefined) changedItem.lastEditedBy = values.lastEditedBy;
             changedItem.updatedAt = now;
             ack = {
               t: 'ack', opId: operation.operationId, status: 'accepted',
@@ -677,7 +689,8 @@ export class Store {
         collected INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
-        by TEXT
+        by TEXT,
+        last_edited_by TEXT
       )`,
       'CREATE INDEX IF NOT EXISTS items_list_id_idx ON items(list_id)',
       `CREATE TABLE IF NOT EXISTS members (
@@ -707,6 +720,10 @@ export class Store {
     const columns = this.sqlite.prepare('PRAGMA table_info(lists)').all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === 'revision')) {
       this.sqlite.exec('ALTER TABLE lists ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+    }
+    const itemColumns = this.sqlite.prepare('PRAGMA table_info(items)').all() as Array<{ name: string }>;
+    if (!itemColumns.some((column) => column.name === 'last_edited_by')) {
+      this.sqlite.exec('ALTER TABLE items ADD COLUMN last_edited_by TEXT');
     }
     const processedColumns = this.sqlite.prepare('PRAGMA table_info(processed_operations)').all() as Array<{ name: string }>;
     if (!processedColumns.some((column) => column.name === 'terminal')) {
@@ -759,6 +776,8 @@ export class Store {
             createdAt: numberOr(item.createdAt, Date.now()),
             updatedAt: numberOr(item.updatedAt, numberOr(item.createdAt, Date.now())),
             by: typeof item.by === 'string' ? cleanText(item.by, 80) || null : null,
+            // Legacy records do not contain reliable last-editor history.
+            lastEditedBy: null,
           }).onConflictDoNothing().run();
         }
 
