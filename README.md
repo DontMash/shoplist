@@ -58,6 +58,10 @@ pnpm install
 pnpm dev           # starts the backend and Vite frontend together
 ```
 
+For local configuration, copy `.env.example` to `.env` at the repository root.
+The server also accepts `apps/server/.env`; shell, container, and CI environment
+variables take precedence over both files.
+
 To run them in separate terminals:
 
 ```bash

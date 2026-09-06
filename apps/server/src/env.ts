@@ -1,10 +1,39 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
 import { createEnv } from '@t3-oss/env-core';
 import { z } from 'zod';
 
+const SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const PROJECT_DIR = path.resolve(SERVER_DIR, '../..');
+
+/** Resolve development env files without changing the precedence of process env. */
+export function environmentFilePaths(
+  cwd = process.cwd(),
+  serverDir = SERVER_DIR,
+  projectDir = PROJECT_DIR,
+): string[] {
+  return [...new Set([
+    path.resolve(cwd, '.env'),
+    path.join(serverDir, '.env'),
+    path.join(projectDir, '.env'),
+  ])];
+}
+
 // Load local development values before t3-env validates the runtime source.
 // Container and CI environments continue to provide their values directly.
-loadDotenv();
+export function loadEnvironmentFiles(
+  cwd = process.cwd(),
+  serverDir = SERVER_DIR,
+  projectDir = PROJECT_DIR,
+): void {
+  for (const file of environmentFilePaths(cwd, serverDir, projectDir)) {
+    if (existsSync(file)) loadDotenv({ path: file });
+  }
+}
+
+loadEnvironmentFiles();
 
 /**
  * Read and validate the server environment at the point an application is
