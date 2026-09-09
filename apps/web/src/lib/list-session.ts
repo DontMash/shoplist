@@ -17,6 +17,7 @@ export type SessionStatus =
   | 'offline'
   | 'missing'
   | 'deleted'
+  | 'upgrade-required'
   | 'closed';
 
 export type RejectionReason =
@@ -49,7 +50,7 @@ export interface RejectedOperationOutcome {
 }
 
 export interface TerminalSessionOutcome {
-  kind: 'missing' | 'deleted';
+  kind: 'missing' | 'deleted' | 'upgrade-required';
   message?: string;
 }
 
@@ -479,6 +480,10 @@ class ListSessionImpl implements ListSession {
       this.terminal('missing', 'This list no longer exists.');
       return;
     }
+    if (info?.code === 4006 || info?.reason === 'upgrade-required') {
+      this.terminal('upgrade-required', 'Reload to use the current list-session protocol.');
+      return;
+    }
     this.setStatus(typeof navigator !== 'undefined' && navigator.onLine === false ? 'offline' : 'reconnecting');
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     const attempt = this.reconnectAttempt++;
@@ -527,6 +532,10 @@ class ListSessionImpl implements ListSession {
     }
     if (message.t === 'closed') {
       this.terminal(message.reason === 'deleted' ? 'deleted' : 'missing');
+      return;
+    }
+    if (message.t === 'upgrade-required') {
+      this.terminal('upgrade-required', typeof message.message === 'string' ? message.message : 'Reload to use the current list-session protocol.');
       return;
     }
     if (message.t === 'error') {
@@ -612,7 +621,7 @@ class ListSessionImpl implements ListSession {
     }
   }
 
-  private terminal(kind: 'missing' | 'deleted', message?: string): void {
+  private terminal(kind: 'missing' | 'deleted' | 'upgrade-required', message?: string): void {
     if (this.terminalState) return;
     this.terminalState = true;
     this.pendingOperations = [];

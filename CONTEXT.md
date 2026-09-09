@@ -20,6 +20,14 @@ _Avoid_: item owner, author
 A participant's ongoing participation in a list, from a successful join until explicitly leaving or losing access. It is distinct from a list session, which may end and reconnect without changing membership.
 _Avoid_: presence, connection
 
+**List revision**:
+The ordered version of a list's accepted state, advanced by each committed mutation that changes that state. It is distinct from an event-stream cursor, which only tracks delivery progress.
+_Avoid_: event ID, notification history
+
+**Operation ID**:
+The identity of one participant-requested list mutation, retained when delivery is retried so the same mutation is not applied twice.
+_Avoid_: request ID, message ID
+
 **List activity notification**:
 A brief push alert about an accepted list mutation or a participant joining, intended to bring an unavailable participant back to the list rather than serve as a history of changes.
 _Avoid_: audit log, activity history

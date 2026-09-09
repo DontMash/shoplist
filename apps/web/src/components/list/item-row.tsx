@@ -162,7 +162,7 @@ export function ItemRow({ item, session, askDelete, editorName }: ItemRowProps) 
             </itemForm.Field>
           </div>
           <div className="item-row2">
-            <button type="button" className="chip chip-collected" aria-pressed={!!item.collected} onClick={collect}><Icon name="check" /><span>Collected</span></button>
+            <button type="button" className="chip chip-collected" aria-pressed={!!item.collected} onClick={collect}><Icon name="check" /><span>{item.collected ? "Collected" : "Collect"}</span></button>
             {editorName && <span className="item-editor-badge">{editorName}</span>}
             <span className="spacer" />
             <Button type="button" variant="ghost" size="icon" className="icon-btn item-del" aria-label="Delete item" onClick={remove}><Icon name="trash" /></Button>

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { createHash } from 'node:crypto';
 import SQLiteDatabase from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { and, eq } from 'drizzle-orm';
@@ -75,6 +76,8 @@ export interface StoreOperation {
   payload: Record<string, unknown>;
   actorClientId: string | null;
   actorName?: string;
+  /** Current typed transports opt into strict Operation ID payload fencing. */
+  protocolVersion?: number;
 }
 
 export interface OperationAck {
@@ -516,6 +519,7 @@ export class Store {
   public applyOperation(listId: string, operation: StoreOperation): OperationResult {
     const current = this.getList(listId);
     const operationId = typeof operation.operationId === 'string' ? operation.operationId : '';
+    const payloadHash = operation.protocolVersion === 1 ? operationFingerprint(operation) : undefined;
     if (operationId) {
       const stored = this.db.select().from(schema.processedOperations)
         .where(and(
@@ -523,9 +527,18 @@ export class Store {
           eq(schema.processedOperations.operationId, operationId),
         )).get();
       if (stored) {
+        const list = this.getList(listId);
+        if (payloadHash && stored.payloadHash && stored.payloadHash !== payloadHash) {
+          return {
+            ack: rejected(operation, list?.revision ?? stored.revision, 'operation-id-reused', 'The Operation ID was already used for a different mutation.'),
+            list,
+            duplicate: false,
+            terminal: false,
+          };
+        }
         return {
           ack: JSON.parse(stored.responseJson) as OperationAck,
-          list: this.getList(listId),
+          list,
           duplicate: true,
           terminal: Boolean(stored.terminal),
         };
@@ -543,6 +556,7 @@ export class Store {
           status: ack.status,
           revision: ack.revision,
           responseJson: JSON.stringify(ack),
+          payloadHash,
           terminal: false,
           processedAt: Date.now(),
         }).run();
@@ -558,6 +572,7 @@ export class Store {
         status: ack.status,
         revision: ack.revision,
         responseJson: JSON.stringify(ack),
+        payloadHash,
         terminal: false,
         processedAt: Date.now(),
       }).run();
@@ -765,6 +780,7 @@ export class Store {
         status: ack.status,
         revision: ack.revision,
         responseJson: JSON.stringify(ack),
+        payloadHash,
         terminal,
         processedAt: now,
       }).run();
@@ -853,6 +869,7 @@ export class Store {
         status TEXT NOT NULL CHECK (status IN ('accepted', 'rejected')),
         revision INTEGER NOT NULL,
         response_json TEXT NOT NULL,
+        payload_hash TEXT,
         terminal INTEGER NOT NULL DEFAULT 0,
         processed_at INTEGER NOT NULL,
         PRIMARY KEY (list_id, operation_id)
@@ -876,6 +893,9 @@ export class Store {
       this.sqlite.exec('ALTER TABLE members ADD COLUMN left_at INTEGER');
     }
     const processedColumns = this.sqlite.prepare('PRAGMA table_info(processed_operations)').all() as Array<{ name: string }>;
+    if (!processedColumns.some((column) => column.name === 'payload_hash')) {
+      this.sqlite.exec('ALTER TABLE processed_operations ADD COLUMN payload_hash TEXT');
+    }
     if (!processedColumns.some((column) => column.name === 'terminal')) {
       this.sqlite.exec('ALTER TABLE processed_operations ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0');
     }
@@ -986,6 +1006,23 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function operationFingerprint(operation: StoreOperation): string {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, canonical(nested)]));
+    }
+    return value;
+  };
+  return createHash('sha256').update(JSON.stringify(canonical({
+    kind: operation.kind,
+    payload: operation.payload,
+    actorClientId: operation.actorClientId,
+  }))).digest('hex');
 }
 
 function rejected(operation: StoreOperation, revision: number, reason: string, message: string): OperationAck {

@@ -21,6 +21,8 @@ export const processedOperations = sqliteTable('processed_operations', {
   status: text('status').notNull(),
   revision: integer('revision').notNull(),
   responseJson: text('response_json').notNull(),
+  /** Canonical command identity used to reject Operation ID payload reuse. */
+  payloadHash: text('payload_hash'),
   terminal: integer('terminal', { mode: 'boolean' }).notNull().default(false),
   processedAt: integer('processed_at').notNull(),
 }, (table) => [primaryKey({ columns: [table.listId, table.operationId] })]);

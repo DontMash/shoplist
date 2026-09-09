@@ -1,3 +1,7 @@
+import { createORPCClient } from '@orpc/client';
+import { RPCLink } from '@orpc/client/fetch';
+import type { ContractRouterClient } from '@orpc/contract';
+import { transportContract, type TransportContract } from '@shoplist/transport-contract';
 import { z } from 'zod';
 
 const itemResponseSchema = z.object({
@@ -46,6 +50,19 @@ export type CreateListResponse = z.infer<typeof createListResponseSchema>;
 export type ListResponseItem = ListResponse['items'][number];
 export type ListResponseMember = z.infer<typeof memberResponseSchema>;
 
+type TransportClient = ContractRouterClient<TransportContract>;
+const rpcClient = createORPCClient<TransportClient>(new RPCLink({ url: '/rpc' }));
+
+function rpcStatus(error: unknown): number {
+  return error && typeof error === 'object' && 'status' in error && typeof error.status === 'number'
+    ? error.status : 0;
+}
+
+function rpcMessage(error: unknown): string {
+  return error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+    ? error.message : 'Request failed';
+}
+
 /** Errors retain the HTTP status so query consumers can distinguish 404s. */
 export class ApiError extends Error {
   public readonly status: number;
@@ -68,26 +85,43 @@ async function readResponse<T>(response: Response, schema: z.ZodType<T>): Promis
 }
 
 export async function fetchList(id: string, signal?: AbortSignal): Promise<ListResponse> {
-  const response = await fetch(`/api/lists/${encodeURIComponent(id)}`, { signal });
-  return readResponse(response, listResponseSchema);
+  try {
+    return await rpcClient.list.get({ id }, { signal });
+  } catch (error) {
+    // Keep the old endpoint as a short-lived deployment fallback while an
+    // already-open browser finishes upgrading to the current protocol.
+    if (rpcStatus(error) >= 400 && rpcStatus(error) !== 404) throw new ApiError(rpcStatus(error), rpcMessage(error));
+    const response = await fetch(`/api/lists/${encodeURIComponent(id)}`, { signal });
+    return readResponse(response, listResponseSchema);
+  }
 }
 
 export async function createList(name: string): Promise<CreateListResponse> {
-  const response = await fetch('/api/lists', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name }),
-  });
-  return readResponse(response, createListResponseSchema);
+  try {
+    return await rpcClient.list.create({ name });
+  } catch (error) {
+    if (rpcStatus(error) >= 400 && rpcStatus(error) !== 404) throw new ApiError(rpcStatus(error), rpcMessage(error));
+    const response = await fetch('/api/lists', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    return readResponse(response, createListResponseSchema);
+  }
 }
 
 export async function leaveList(listId: string, clientId: string): Promise<boolean> {
-  const response = await fetch(`/api/lists/${encodeURIComponent(listId)}/leave`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ clientId }),
-  });
-  return (await readResponse(response, leaveListResponseSchema)).left;
+  try {
+    return (await rpcClient.list.leave({ listId, clientId })).left;
+  } catch (error) {
+    if (rpcStatus(error) >= 400 && rpcStatus(error) !== 404) throw new ApiError(rpcStatus(error), rpcMessage(error));
+    const response = await fetch(`/api/lists/${encodeURIComponent(listId)}/leave`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ clientId }),
+    });
+    return (await readResponse(response, leaveListResponseSchema)).left;
+  }
 }
 
 /** Normalize a websocket full-state message into the same shape as REST data. */

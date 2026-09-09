@@ -48,7 +48,7 @@ export default defineConfig({
         // (icons). Stable names like app.js are handled via Workbox revisions.
         globPatterns: ['**/*.{js,css,html,svg,png}'],
       },
-      // No service worker during development so /api and /ws proxies stay clean.
+      // No service worker during development so /api and /rpc proxies stay clean.
       devOptions: { enabled: false },
     }),
   ],
@@ -59,7 +59,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': 'http://127.0.0.1:3000',
-      '/ws': { target: 'ws://127.0.0.1:3000', ws: true },
+      '/rpc': { target: 'http://127.0.0.1:3000', ws: true },
     },
   },
   build: {

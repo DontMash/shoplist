@@ -29,6 +29,7 @@ function sessionStatusLabel(status: SessionStatus): string {
     case 'offline': return 'Offline';
     case 'missing': return 'List missing';
     case 'deleted': return 'List deleted';
+    case 'upgrade-required': return 'Reload required';
     case 'closed': return 'Closed';
   }
 }
@@ -40,6 +41,7 @@ const SESSION_STATUS_CLASSES: Record<SessionStatus, string> = {
   offline: 'status-offline',
   missing: 'status-missing',
   deleted: 'status-deleted',
+  'upgrade-required': 'status-deleted',
   closed: 'status-closed',
 };
 
@@ -113,8 +115,12 @@ export function ListPage({ id }: { id: string }) {
   }, [sessionState.outcome]);
   useEffect(() => {
     const outcome = sessionState.outcome;
-    if (!outcome || (outcome.kind !== 'missing' && outcome.kind !== 'deleted') || terminalHandled.current) return;
+    if (!outcome || (outcome.kind !== 'missing' && outcome.kind !== 'deleted' && outcome.kind !== 'upgrade-required') || terminalHandled.current) return;
     terminalHandled.current = true;
+    if (outcome.kind === 'upgrade-required') {
+      notify(outcome.message || 'Reload to use the current list-session protocol.');
+      return;
+    }
     notify(outcome.kind === 'missing' ? 'This list no longer exists.' : 'This list was deleted by its owner.');
     forgetList(true);
     navigate('/');

@@ -12,7 +12,7 @@ declare let self: ServiceWorkerGlobalScope & {
 precacheAndRoute(self.__WB_MANIFEST);
 cleanupOutdatedCaches();
 registerRoute(new NavigationRoute(createHandlerBoundToURL('/index.html'), {
-  denylist: [/^\/api\//],
+  denylist: [/^\/(?:api|rpc)(?:\/|$)/],
 }));
 registerRoute(({ url }) => url.pathname === '/api/qr', new StaleWhileRevalidate({ cacheName: 'shoplist-qr' }));
 

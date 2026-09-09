@@ -3,6 +3,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Hono, type Context, type Next } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { serve, upgradeWebSocket, type ServerType } from '@hono/node-server';
+import { RPCHandler as FetchRPCHandler } from '@orpc/server/fetch';
+import { RPCHandler as WebSocketRPCHandler } from '@orpc/server/ws';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { WebSocketServer } from 'ws';
 import QRCode from 'qrcode';
@@ -18,6 +20,7 @@ import {
 import type { WSContext } from 'hono/ws';
 import { NotificationDispatcher, onlineClientIds, WebPushSender, type NotificationEvent, type PushSender } from './notifications.js';
 import { loadServerEnv, type ServerEnv } from './env.js';
+import { createRpcRouter, RpcEventPublisher, RpcSessionRegistry } from './rpc.js';
 
 const SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BUILT_DIR = path.resolve(SERVER_DIR, '../web/dist');
@@ -55,6 +58,8 @@ export interface ShoplistApp {
   app: Hono;
   store: Store;
   rooms: Rooms;
+  rpcPublisher: RpcEventPublisher;
+  rpcSessions: RpcSessionRegistry;
   buildId: string;
   dispatcher: NotificationDispatcher;
 }
@@ -326,6 +331,17 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
   const dispatcher = new NotificationDispatcher(store, pushSender, (listId) => onlineClientIds(rooms, listId), {
     coalesceMs: options.notificationCoalesceMs,
   });
+  const rpcPublisher = new RpcEventPublisher();
+  const rpcSessions = new RpcSessionRegistry();
+  const rpcRouter = createRpcRouter({
+    store,
+    publisher: rpcPublisher,
+    sessions: rpcSessions,
+    dispatcher,
+    publicKey: pushPublicKey,
+  });
+  const rpcHttpHandler = new FetchRPCHandler(rpcRouter);
+  const rpcWebSocketHandler = new WebSocketRPCHandler(rpcRouter);
   const app = new Hono();
 
   app.use('*', async (c, next) => {
@@ -339,6 +355,30 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
   });
 
   app.get('/healthz', (c) => json(c, 200, { ok: true, lists: store.listCount(), build: buildId }));
+
+  // One logical endpoint serves unary oRPC calls over HTTP. The WebSocket
+  // upgrade below uses the same prefix and router, but keeps a separate oRPC
+  // handler because the wire framing differs from fetch.
+  const rpcUpgrade = sameOriginMiddleware(publicOrigin);
+  const rpcWebSocketRoute = upgradeWebSocket((c) => ({
+    onOpen(_event, socket) {
+      const raw = socket.raw;
+      if (raw && typeof (raw as { addEventListener?: unknown }).addEventListener === 'function') {
+        void rpcWebSocketHandler.upgrade(raw as unknown as Parameters<typeof rpcWebSocketHandler.upgrade>[0], { context: {} });
+      } else {
+        socket.close(1011, 'websocket adapter unavailable');
+      }
+    },
+  }));
+  app.get('/rpc/*', rpcUpgrade, rpcWebSocketRoute);
+  app.get('/rpc', rpcUpgrade, rpcWebSocketRoute);
+
+  const handleRpc = async (c: Context): Promise<Response> => {
+    const result = await rpcHttpHandler.handle(c.req.raw, { prefix: '/rpc', context: {} });
+    return result.matched ? result.response : json(c, 404, { error: 'procedure not found' });
+  };
+  app.all('/rpc/*', rpcUpgrade, handleRpc);
+  app.all('/rpc', rpcUpgrade, handleRpc);
 
   app.post('/api/lists', sameOriginMiddleware(publicOrigin), async (c) => {
     if (!/^application\/json/i.test(c.req.header('content-type') || '')) {
@@ -593,7 +633,7 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
   app.on(['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], '*', (c) => json(c, 405, { error: 'method not allowed' }));
   app.notFound((c) => json(c, 404, { error: 'not found' }));
 
-  return { app, store, rooms, buildId, dispatcher };
+  return { app, store, rooms, rpcPublisher, rpcSessions, buildId, dispatcher };
 }
 
 /** Create the Hono application without opening a listening socket. */
@@ -634,6 +674,8 @@ export function startServer(options: StartOptions = {}): RunningServer {
       }
     }
     resources.rooms.clear();
+    resources.rpcPublisher.closeAll();
+    resources.rpcSessions.closeAll();
     resources.store.close();
     websocketServer.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));

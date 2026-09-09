@@ -65,11 +65,11 @@ variables take precedence over both files.
 To run them in separate terminals:
 
 ```bash
-pnpm dev:server                         # backend API + WebSocket on port 3000
+pnpm dev:server                         # backend oRPC API + WebSocket on port 3000
 pnpm --filter @shoplist/web dev         # Vite frontend on http://localhost:5173
 ```
 
-Vite proxies `/api` and `/ws` to the backend during development. The server
+Vite proxies `/api` (legacy compatibility) and the unified `/rpc` endpoint to the backend during development. The server
 loads a local `.env` file when present and validates the values with t3-env;
 shell, container, and CI environment values retain precedence over that file.
 For a production-like local run, build the frontend first and then start the
@@ -95,25 +95,28 @@ pnpm start          # serves the Vite build on port 3000
 ## How it works
 
 - **Server** — a single Node.js process (`apps/server/src/server.ts`) using Hono and
-  `@hono/node-server`. It serves the PWA, a small REST API (`POST /api/lists`,
-  `GET /api/lists/:id`, `GET /api/qr`) and the WebSocket endpoint
-  `/ws?list=…&client=…&name=…`. The QR endpoint uses
-  [`qrcode`](https://github.com/soldair/node-qrcode)'s async SVG renderer so
-  the server returns a compact image without shipping a QR library to clients.
-  WebSockets use Hono's
-  `upgradeWebSocket` helper with the same Node server (backed by `ws`), so
-  there is no second realtime service.
+  `@hono/node-server`. It serves the PWA and a typed oRPC endpoint at `/rpc`.
+  Unary procedures cover list management, notifications, and QR generation;
+  list-session procedures use a WebSocket upgrade on the same route. The old
+  REST and `/ws` paths remain compatibility adapters during rollout. The QR
+  procedure uses [`qrcode`](https://github.com/soldair/node-qrcode)'s async SVG
+  renderer so the server returns a compact image without shipping a QR library
+  to clients. WebSockets use Hono's `upgradeWebSocket` helper with the same
+  Node server (backed by `ws`), so there is no second realtime service.
 - **Sync model** — each active route owns a list session. The session keeps an
   authoritative revisioned base plus an optimistic, bounded operation outbox,
   and publishes visible rows through an isolated TanStack DB collection backed
-  by the existing TanStack Query cache. Clients send identified ops (`item:add`,
-  `item:update`, `item:delete`, `list:clear`, `list:rename`, `list:delete`); the
-  SQLite server applies each operation transactionally, persists its original
-  acknowledgement, and broadcasts a revisioned **full list state**. Reconnects
-  replay the same operation IDs sequentially, so lost acknowledgements cannot
-  duplicate an add or repeat a list-wide action. Rejected operations roll back
-  over later pending work; edits made while offline remain in memory and are
-  flushed on reconnect.
+  by the existing TanStack Query cache. Current browsers use typed oRPC
+  `listSession.open`, event subscription, and one procedure per mutation
+  (`item.add`, `item.update`, `item.delete`, `list.clear`, `list.rename`,
+  `list.delete`). The SQLite server applies each operation transactionally,
+  persists its original acknowledgement and Operation ID fingerprint, and
+  broadcasts revisioned **full list state** events. Reconnects replay the same
+  Operation IDs sequentially, so lost acknowledgements cannot duplicate an add
+  or repeat a list-wide action. Rejected operations roll back over later pending
+  work; edits made while offline remain in memory and are flushed on reconnect.
+  Event cursors track delivery only; list revisions remain the reconciliation
+  fence.
 - **Storage** — a SQLite database (`data/db.sqlite`) accessed through Drizzle ORM
   and the `better-sqlite3` adapter. `store.ts` is the application repository, not
   a second database: it owns the Drizzle connection, validates domain operations,
@@ -179,9 +182,12 @@ cannot be represented safely by one compiling project.
 ## Project layout
 
 ```
-apps/server/src/server.ts         Hono app, REST API, QR endpoint, WebSocket sync
+apps/server/src/server.ts         Hono app, `/rpc` endpoint, compatibility routes, static serving
+apps/server/src/rpc.ts             oRPC implementation, event publisher, and session scopes
+apps/server/src/effect/services.ts Effect Store/Clock/Publisher/ListSession layers
 apps/server/src/store.ts          Drizzle repository/cache + idempotent domain operations
 apps/server/src/db/schema.ts       Drizzle SQLite table definitions
+apps/transport-contract/src/index.ts Shared oRPC/Zod wire contract and protocol errors
 apps/server/tests/smoke.test.ts   Vitest unit, migration, API, and realtime suite
 apps/server/package.json           backend workspace package
 apps/server/tsconfig.json          server-specific TypeScript configuration
