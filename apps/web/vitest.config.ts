@@ -11,6 +11,8 @@ export default mergeConfig(sharedConfig, defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // Keep the native transport's absolute URL away from any developer server.
+    environmentOptions: { jsdom: { url: 'http://shoplist.test/' } },
     setupFiles: ['./tests/setup.ts'],
   },
 }));

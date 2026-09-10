@@ -1,4 +1,5 @@
 import { ORPCError } from '@orpc/client';
+import { AsyncIteratorClass } from '@orpc/shared';
 import { Layer } from 'effect';
 import { implement } from '@orpc/server';
 import type { NotificationDispatcher } from './notifications.js';
@@ -418,8 +419,17 @@ export function createRpcRouter(deps: RpcDependencies) {
         const clientId = cleanText(input.clientId, 64);
         if (!clientId) invalid('BAD_REQUEST', 'A participant identity is required.', 400);
         const session = context.sessions.open(list.id, clientId, input.name || 'Guest');
-        context.store.touchMember(list, session.clientId, session.name, session.participant.color);
+        const membership = context.store.touchMember(list, session.clientId, session.name, session.participant.color);
         publishPresence(context, list.id);
+        if (membership.joined) {
+          void context.dispatcher.dispatch({
+            listId: list.id,
+            listName: list.name,
+            actorClientId: session.clientId,
+            actorName: session.name,
+            kind: 'join',
+          });
+        }
         return {
           protocolVersion: PROTOCOL_VERSION,
           sessionId: session.sessionId,
@@ -429,16 +439,21 @@ export function createRpcRouter(deps: RpcDependencies) {
           eventCursor: context.publisher.cursor(list.id),
         } satisfies ListSessionOpenOutput;
       }),
-      events: implementer.listSession.events.handler(async function* ({ input }) {
+      events: implementer.listSession.events.handler(({ input }) => {
         const session = assertSession(context, input.listId, input.sessionId);
         const queue = context.publisher.subscribe(session.listId, input.cursor);
-        try {
-          for await (const event of queue) yield event;
-        } finally {
+        // A plain async generator would suspend inside `queue.next()`, so
+        // returning from it while the queue is idle could not run its
+        // `finally`: oRPC's iterator adapter awaits the generator's return
+        // before the pending read settles. This iterator instead releases the
+        // queue and the list-session subscription as soon as the consumer
+        // cancels the stream.
+        return new AsyncIteratorClass<SessionEvent>(() => queue.next(), async () => {
+          queue.end();
           context.publisher.unsubscribe(session.listId, queue);
           const closed = context.sessions.close(session.sessionId);
           if (closed) publishPresence(context, session.listId);
-        }
+        });
       }),
     },
     item: {

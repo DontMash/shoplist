@@ -10,6 +10,18 @@ import {
 
 const status = { enabled: true, muted: false, available: true };
 
+/** Minimal oRPC fetch response for the native transport. */
+function rpcResponse(value: unknown, statusCode = 200): Response {
+  return new Response(JSON.stringify({ json: value }), {
+    status: statusCode,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function requestUrl(call: [Request, RequestInit?]): string {
+  return call[0].url;
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
   vi.stubGlobal('fetch', vi.fn());
@@ -37,18 +49,27 @@ describe('browser push adapter', () => {
       value: { ready: Promise.resolve({ pushManager: { getSubscription, subscribe } }) },
     });
     (window.Notification.requestPermission as ReturnType<typeof vi.fn>).mockResolvedValue('granted');
-    (fetch as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ publicKey: 'BElongPublicKey' }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => status });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(rpcResponse({ publicKey: 'BElongPublicKey' }))
+      .mockResolvedValueOnce(rpcResponse(status));
+    vi.stubGlobal('fetch', fetchMock);
 
     await expect(enableNotifications('list-1', 'client-1')).resolves.toEqual(status);
     expect(window.Notification.requestPermission).toHaveBeenCalledOnce();
     expect(getSubscription).toHaveBeenCalledOnce();
     expect(subscribe).toHaveBeenCalledWith(expect.objectContaining({ userVisibleOnly: true, applicationServerKey: expect.any(Uint8Array) }));
-    expect(fetch).toHaveBeenNthCalledWith(2, '/api/lists/list-1/notifications', expect.objectContaining({
-      method: 'PUT',
-      body: JSON.stringify({ clientId: 'client-1', subscription: { endpoint: 'https://push.example/subscription', keys: { p256dh: 'public', auth: 'auth' } } }),
-    }));
+
+    const calls = fetchMock.mock.calls as Array<[Request, RequestInit?]>;
+    expect(requestUrl(calls[0])).toContain('/rpc/push/config');
+    expect(requestUrl(calls[1])).toContain('/rpc/push/register');
+    expect(calls.every((call) => !requestUrl(call).includes('/api/'))).toBe(true);
+    expect(JSON.parse(await calls[1][0].text())).toEqual({
+      json: {
+        listId: 'list-1',
+        clientId: 'client-1',
+        subscription: { endpoint: 'https://push.example/subscription', keys: { p256dh: 'public', auth: 'auth' } },
+      },
+    });
   });
 
   it('does not register a destination when permission is denied', async () => {
@@ -57,19 +78,37 @@ describe('browser push adapter', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('reads, mutes, unmutes, and disables a destination through the API', async () => {
-    (fetch as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ ok: true, json: async () => status })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...status, muted: true }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: false, muted: false, available: true }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: false, muted: false, available: true }) });
+  it('reads, mutes, unmutes, and disables a destination through the native transport', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(rpcResponse(status))
+      .mockResolvedValueOnce(rpcResponse({ ...status, muted: true }))
+      .mockResolvedValueOnce(rpcResponse({ enabled: false, muted: false, available: true }))
+      .mockResolvedValueOnce(rpcResponse({ enabled: false, muted: false, available: true }));
+    vi.stubGlobal('fetch', fetchMock);
 
     await expect(getNotificationStatus('list-1', 'client-1')).resolves.toEqual(status);
     await expect(muteNotifications('list-1', 'client-1')).resolves.toMatchObject({ muted: true });
     await expect(unmuteNotifications('list-1', 'client-1')).resolves.toMatchObject({ muted: false });
     await expect(disableNotifications('list-1', 'client-1')).resolves.toMatchObject({ enabled: false });
-    expect(fetch).toHaveBeenNthCalledWith(2, '/api/lists/list-1/notifications', expect.objectContaining({ method: 'PATCH' }));
-    expect(fetch).toHaveBeenNthCalledWith(3, '/api/lists/list-1/notifications', expect.objectContaining({ method: 'PATCH' }));
-    expect(fetch).toHaveBeenNthCalledWith(4, '/api/lists/list-1/notifications?client=client-1', expect.objectContaining({ method: 'DELETE' }));
+
+    const calls = fetchMock.mock.calls as Array<[Request, RequestInit?]>;
+    expect(calls.map(requestUrl)).toEqual([
+      expect.stringContaining('/rpc/push/status'),
+      expect.stringContaining('/rpc/push/mute'),
+      expect.stringContaining('/rpc/push/mute'),
+      expect.stringContaining('/rpc/push/remove'),
+    ]);
+    expect(JSON.parse(await calls[1][0].text())).toEqual({ json: { listId: 'list-1', clientId: 'client-1', muted: true } });
+    expect(JSON.parse(await calls[2][0].text())).toEqual({ json: { listId: 'list-1', clientId: 'client-1', muted: false } });
+    expect(calls.every((call) => !requestUrl(call).includes('/api/'))).toBe(true);
+  });
+
+  it('reports transport failures and malformed status payloads safely', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(rpcResponse({ enabled: 'yes' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(getNotificationStatus('list-1', 'client-1')).rejects.toThrow('The server returned invalid notification settings.');
+
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')));
+    await expect(muteNotifications('list-1', 'client-1')).rejects.toThrow('Notification settings could not be saved.');
   });
 });

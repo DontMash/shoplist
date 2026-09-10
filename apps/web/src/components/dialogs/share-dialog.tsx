@@ -1,12 +1,28 @@
+import { useEffect, useState } from 'react';
 import { Button } from '../ui/button';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '../ui/input-group';
 import { Icon } from '../shared/icon';
 import type { ShareDialogPayload } from '../../stores/dialog-store';
 import { Modal } from './modal';
 import { notify } from '../notification-toaster';
+import { rpcClient } from '../../lib/rpc-client';
 
 export function ShareDialog({ payload, close }: { payload: ShareDialogPayload; close: () => void }) {
   const url = `${window.location.origin}/#/join/${payload.list.id}`;
+  const [qr, setQr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    rpcClient.qr.generate({ data: url }).then(
+      ({ svg }) => {
+        if (active) setQr(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+      },
+      () => {
+        if (active) setQr(null);
+      },
+    );
+    return () => { active = false; };
+  }, [url]);
 
   const copy = async () => {
     try {
@@ -36,7 +52,7 @@ export function ShareDialog({ payload, close }: { payload: ShareDialogPayload; c
       onOpenChange={(open) => { if (!open) close(); }}
       actions={[{ label: 'Done', onClick: close }]}
     >
-      <div className="qr"><img src={`/api/qr?data=${encodeURIComponent(url)}`} alt="QR code with the invite link" /></div>
+      <div className="qr">{qr ? <img src={qr} alt="QR code with the invite link" /> : null}</div>
       <InputGroup className="share-link">
         <InputGroupInput readOnly value={url} aria-label="Invite link" />
         <InputGroupAddon align="inline-end" className="pr-1.5">

@@ -1,11 +1,9 @@
+import { rpcClient } from './rpc-client';
+
 export interface NotificationStatus {
   enabled: boolean;
   muted: boolean;
   available: boolean;
-}
-
-interface PushConfig {
-  publicKey: string | null;
 }
 
 interface SubscriptionJson {
@@ -14,11 +12,6 @@ interface SubscriptionJson {
     p256dh?: string;
     auth?: string;
   };
-}
-
-async function readJson<T>(response: Response): Promise<T> {
-  if (!response.ok) throw new Error('Notification settings could not be saved.');
-  return response.json() as Promise<T>;
 }
 
 function ensureStatus(value: unknown): NotificationStatus {
@@ -46,9 +39,18 @@ function subscriptionJson(subscription: PushSubscription): { endpoint: string; k
   return { endpoint, keys: { p256dh, auth } };
 }
 
-export async function getNotificationStatus(listId: string, clientId: string): Promise<NotificationStatus> {
-  const response = await fetch(`/api/lists/${encodeURIComponent(listId)}/notifications?client=${encodeURIComponent(clientId)}`);
-  return ensureStatus(await readJson(response));
+async function statusOrThrow(request: Promise<unknown>): Promise<NotificationStatus> {
+  let value: unknown;
+  try {
+    value = await request;
+  } catch {
+    throw new Error('Notification settings could not be saved.');
+  }
+  return ensureStatus(value);
+}
+
+export function getNotificationStatus(listId: string, clientId: string): Promise<NotificationStatus> {
+  return statusOrThrow(rpcClient.push.status({ listId, clientId }));
 }
 
 export async function enableNotifications(listId: string, clientId: string): Promise<NotificationStatus> {
@@ -60,8 +62,7 @@ export async function enableNotifications(listId: string, clientId: string): Pro
   // prompt with the explicit list-menu action that initiated it.
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') throw new Error('Notifications are blocked. Allow them in your browser settings.');
-  const configResponse = await fetch('/api/push/config');
-  const config = await readJson<PushConfig>(configResponse);
+  const config = await rpcClient.push.config({});
   if (!config.publicKey) throw new Error('Push notifications are not configured on this Shoplist server.');
   const registration = await navigator.serviceWorker.ready;
   if (!registration.pushManager) throw new Error('Push notifications are not supported in this browser.');
@@ -70,21 +71,15 @@ export async function enableNotifications(listId: string, clientId: string): Pro
     userVisibleOnly: true,
     applicationServerKey: decodePublicKey(config.publicKey) as unknown as BufferSource,
   });
-  const response = await fetch(`/api/lists/${encodeURIComponent(listId)}/notifications`, {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ clientId, subscription: subscriptionJson(subscription) }),
-  });
-  return ensureStatus(await readJson(response));
+  return statusOrThrow(rpcClient.push.register({
+    listId,
+    clientId,
+    subscription: subscriptionJson(subscription),
+  }));
 }
 
-async function updateMuted(listId: string, clientId: string, muted: boolean): Promise<NotificationStatus> {
-  const response = await fetch(`/api/lists/${encodeURIComponent(listId)}/notifications`, {
-    method: 'PATCH',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ clientId, muted }),
-  });
-  return ensureStatus(await readJson(response));
+function updateMuted(listId: string, clientId: string, muted: boolean): Promise<NotificationStatus> {
+  return statusOrThrow(rpcClient.push.mute({ listId, clientId, muted }));
 }
 
 export function muteNotifications(listId: string, clientId: string): Promise<NotificationStatus> {
@@ -95,9 +90,6 @@ export function unmuteNotifications(listId: string, clientId: string): Promise<N
   return updateMuted(listId, clientId, false);
 }
 
-export async function disableNotifications(listId: string, clientId: string): Promise<NotificationStatus> {
-  const response = await fetch(`/api/lists/${encodeURIComponent(listId)}/notifications?client=${encodeURIComponent(clientId)}`, {
-    method: 'DELETE',
-  });
-  return ensureStatus(await readJson(response));
+export function disableNotifications(listId: string, clientId: string): Promise<NotificationStatus> {
+  return statusOrThrow(rpcClient.push.remove({ listId, clientId }));
 }

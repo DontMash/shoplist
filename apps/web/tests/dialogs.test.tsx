@@ -69,15 +69,25 @@ describe('declarative dialogs', () => {
     const share = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     Object.defineProperty(navigator, 'share', { configurable: true, value: share });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ json: { svg: '<svg xmlns="http://www.w3.org/2000/svg"></svg>' } }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
     render(<ShareDialog payload={{ list: { id: 'list-1', name: 'Groceries' } }} close={close} />);
 
     expect(document.querySelector('[data-slot="input-group-addon"]')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy invite link' })).not.toHaveClass('icon-btn');
+    expect(await screen.findByRole('img', { name: 'QR code with the invite link' }))
+      .toHaveAttribute('src', expect.stringContaining('data:image/svg+xml'));
+    const [qrRequest] = fetchMock.mock.calls[0] as [Request];
+    expect(qrRequest.url).toContain('/rpc/qr/generate');
     fireEvent.click(screen.getByRole('button', { name: 'Copy invite link' }));
     fireEvent.click(screen.getByRole('button', { name: 'Share link…' }));
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/#/join/list-1`);
       expect(share).toHaveBeenCalled();
     });
+    vi.unstubAllGlobals();
   });
 });

@@ -58,7 +58,7 @@ describe('notification destinations', () => {
     }
   });
 
-  it('manages notification subscriptions and membership through the HTTP interface', async () => {
+  it('manages notification subscriptions and membership through the OpenAPI transport', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-notification-api-'));
     const resources = createApp({
       dataFile: path.join(directory, 'db.sqlite'),
@@ -68,68 +68,47 @@ describe('notification destinations', () => {
     const list = resources.store.createList('Groceries');
     resources.store.touchMember(list, 'alice', 'Alice', '#123456');
 
-    expect((await resources.app.request('/api/push/config')).status).toBe(200);
-    expect(await (await resources.app.request('/api/push/config')).json()).toEqual({ publicKey: 'public-key' });
-    expect(await (await resources.app.request(`/api/lists/${list.id}/notifications?client=alice`)).json())
-      .toEqual({ enabled: false, muted: false, available: true });
-    expect((await resources.app.request('/api/lists/nope/notifications?client=alice')).status).toBe(404);
-    expect((await resources.app.request(`/api/lists/${list.id}/notifications`)).status).toBe(400);
-    expect((await resources.app.request(`/api/lists/${list.id}/notifications`, { method: 'PUT' })).status).toBe(415);
-    expect((await resources.app.request(`/api/lists/${list.id}/notifications`, {
-      method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{',
-    })).status).toBe(400);
-    expect((await resources.app.request(`/api/lists/${list.id}/notifications`, {
-      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ clientId: 'alice', subscription: { endpoint: 'http://invalid' } }),
-    })).status).toBe(400);
-    expect((await resources.app.request(`/api/lists/${list.id}/notifications`, {
-      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ clientId: 'alice', subscription: { endpoint: '%', keys: subscription.keys } }),
-    })).status).toBe(400);
-    expect((await resources.app.request(`/api/lists/${list.id}/notifications`, {
-      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ clientId: 'nobody', subscription }),
-    })).status).toBe(409);
-    expect((await resources.app.request(`/api/lists/${list.id}/notifications`, {
-      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ clientId: 'alice', muted: true }),
-    })).status).toBe(404);
-    expect((await resources.app.request(`/api/lists/${list.id}/notifications`, {
-      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ clientId: 'alice', muted: 'yes' }),
-    })).status).toBe(400);
-    expect((await resources.app.request(`/api/lists/${list.id}/notifications`, { method: 'DELETE' })).status).toBe(400);
+    const call = async (pathname: string, body: unknown) => {
+      const response = await resources.app.request(`http://shoplist.test/api${pathname}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { status: response.status, body: await response.json() };
+    };
 
-    const put = await resources.app.request(`/api/lists/${list.id}/notifications`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ clientId: 'alice', subscription }),
+    expect(await call('/push/config', {})).toMatchObject({ status: 200, body: { publicKey: 'public-key', available: true } });
+    expect(await call('/push/status', { listId: list.id, clientId: 'alice' })).toMatchObject({
+      status: 200, body: { enabled: false, muted: false, available: true },
     });
-    expect(put.status).toBe(200);
-    expect(await put.json()).toEqual({ enabled: true, muted: false, available: true });
-
-    const patch = await resources.app.request(`/api/lists/${list.id}/notifications`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ clientId: 'alice', muted: true }),
-    });
-    expect(patch.status).toBe(200);
-    expect(await patch.json()).toMatchObject({ enabled: true, muted: true });
-
-    const remove = await resources.app.request(`/api/lists/${list.id}/notifications?client=alice`, { method: 'DELETE' });
-    expect(remove.status).toBe(200);
-    expect(await remove.json()).toMatchObject({ enabled: false, muted: false });
-
-    expect((await resources.app.request(`/api/lists/${list.id}/leave`, { method: 'POST' })).status).toBe(415);
-    expect((await resources.app.request(`/api/lists/${list.id}/leave`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{',
+    expect((await call('/push/status', { listId: 'nope', clientId: 'alice' })).status).toBe(404);
+    expect((await call('/push/register', {
+      listId: list.id,
+      clientId: 'alice',
+      subscription: { endpoint: 'http://invalid.example/subscription', keys: subscription.keys },
     })).status).toBe(400);
-    expect((await resources.app.request(`/api/lists/${list.id}/leave`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
-    })).status).toBe(400);
+    expect((await call('/push/register', { listId: list.id, clientId: 'nobody', subscription })).status).toBe(403);
+    expect((await call('/push/mute', { listId: list.id, clientId: 'alice', muted: true })).status).toBe(404);
+    expect((await call('/push/mute', { listId: list.id, clientId: 'alice', muted: 'yes' })).status).toBe(400);
 
-    const leave = await resources.app.request(`/api/lists/${list.id}/leave`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ clientId: 'alice' }),
+    expect(await call('/push/register', { listId: list.id, clientId: 'alice', subscription })).toMatchObject({
+      status: 200,
+      body: { enabled: true, muted: false, available: true },
     });
-    expect(leave.status).toBe(200);
-    expect(await leave.json()).toEqual({ left: true });
+    expect(await call('/push/mute', { listId: list.id, clientId: 'alice', muted: true })).toMatchObject({
+      status: 200,
+      body: { enabled: true, muted: true },
+    });
+    expect(await call('/push/remove', { listId: list.id, clientId: 'alice' })).toMatchObject({
+      status: 200,
+      body: { enabled: false, muted: false },
+    });
+
+    expect((await call('/list/leave', { listId: list.id })).status).toBe(400);
+    expect(await call('/list/leave', { listId: list.id, clientId: 'alice' })).toMatchObject({
+      status: 200,
+      body: { left: true },
+    });
 
     resources.store.close();
     await rm(directory, { recursive: true, force: true });

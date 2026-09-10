@@ -1,9 +1,9 @@
 import { createORPCClient } from '@orpc/client';
 import { RPCLink } from '@orpc/client/websocket';
-import type { ContractRouterClient } from '@orpc/contract';
 import { Effect, Fiber } from 'effect';
-import { transportContract, PROTOCOL_VERSION, type TransportContract } from '@shoplist/transport-contract';
+import { PROTOCOL_VERSION } from '@shoplist/transport-contract';
 import { fetchList, type ListResponse } from './api';
+import type { TransportClient } from './rpc-client';
 
 export type OperationKind =
   | 'item:add'
@@ -35,9 +35,6 @@ export interface SessionConnectionOptions extends SessionConnectionHandlers {
   clientId: string;
   name: string;
 }
-
-/** Transport client generated from the shared contract, not a domain client. */
-type TransportClient = ContractRouterClient<TransportContract>;
 
 /** Transport seam used by the list session. It is deliberately independent of WebSocket. */
 export interface ListSessionTransport {

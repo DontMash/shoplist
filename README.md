@@ -31,8 +31,9 @@ with **Docker**.
   collecting or deleting; vertical movement remains page scroll.
 - **Mobile-first PWA** — installable to the home screen (Android/iOS),
   offline app shell via service worker, safe-area aware, dark mode support.
-- **QR codes** — rendered server-side as SVG (`/api/qr?data=…`) with the
-  maintained, MIT-licensed `qrcode` package; no client QR dependency.
+- **QR codes** — rendered server-side as SVG by the `qr.generate` transport
+  procedure with the maintained, MIT-licensed `qrcode` package; no client QR
+  dependency.
 
 ## Quick start (Docker)
 
@@ -65,11 +66,12 @@ variables take precedence over both files.
 To run them in separate terminals:
 
 ```bash
-pnpm dev:server                         # backend oRPC API + WebSocket on port 3000
+pnpm dev:server                         # backend oRPC + OpenAPI API and WebSocket on port 3000
 pnpm --filter @shoplist/web dev         # Vite frontend on http://localhost:5173
 ```
 
-Vite proxies `/api` (legacy compatibility) and the unified `/rpc` endpoint to the backend during development. The server
+Vite proxies the OpenAPI transport at `/api` and the native oRPC endpoint at
+`/rpc` to the backend during development. The server
 loads a local `.env` file when present and validates the values with t3-env;
 shell, container, and CI environment values retain precedence over that file.
 For a production-like local run, build the frontend first and then start the
@@ -95,11 +97,14 @@ pnpm start          # serves the Vite build on port 3000
 ## How it works
 
 - **Server** — a single Node.js process (`apps/server/src/server.ts`) using Hono and
-  `@hono/node-server`. It serves the PWA and a typed oRPC endpoint at `/rpc`.
-  Unary procedures cover list management, notifications, and QR generation;
-  list-session procedures use a WebSocket upgrade on the same route. The old
-  REST and `/ws` paths remain compatibility adapters during rollout. The QR
-  procedure uses [`qrcode`](https://github.com/soldair/node-qrcode)'s async SVG
+  `@hono/node-server`. It serves the PWA over **two deliberate transports**:
+  native oRPC at `/rpc` (unary procedures plus a WebSocket upgrade for
+  list-session procedures) and OpenAPI at `/api` (the same implemented router
+  as conventional HTTP operations, with `listSession.events` streamed as SSE).
+  `/api/openapi.json` serves the document generated from the shared transport
+  contract and `/api/docs` serves an interactive Scalar reference backed by
+  that document. The QR procedure uses
+  [`qrcode`](https://github.com/soldair/node-qrcode)'s async SVG
   renderer so the server returns a compact image without shipping a QR library
   to clients. WebSockets use Hono's `upgradeWebSocket` helper with the same
   Node server (backed by `ws`), so there is no second realtime service.
@@ -168,10 +173,11 @@ pnpm test           # Vitest suites + text/HTML coverage reports
 pnpm icons          # regenerate PNG icons (TypeScript script)
 ```
 
-`pnpm test` collects V8 coverage for both workspaces and fails unless lines,
-statements, functions, and branches are all at least 90%. Reports are written to
-`apps/server/coverage/` and `apps/web/coverage/` (ignored generated output).
-The root `vitest.config.ts` owns that shared policy; the two small app configs
+`pnpm test` runs the Vitest suites for the transport contract, server, and web
+workspaces. The server suite collects V8 coverage and fails unless lines,
+statements, functions, and branches are all at least 90%; reports are written to
+`apps/server/coverage/` (ignored generated output).
+The root `vitest.config.ts` owns that shared policy; the app configs
 only select their required runtime (`node` versus `jsdom`) and frontend setup.
 
 TypeScript options shared by both apps live in the root `tsconfig.json`. Each app
@@ -182,13 +188,15 @@ cannot be represented safely by one compiling project.
 ## Project layout
 
 ```
-apps/server/src/server.ts         Hono app, `/rpc` endpoint, compatibility routes, static serving
+apps/server/src/server.ts         Hono app, `/rpc` and `/api` transports, static serving
 apps/server/src/rpc.ts             oRPC implementation, event publisher, and session scopes
+apps/server/src/openapi.ts         OpenAPI document generated from the shared contract
 apps/server/src/effect/services.ts Effect Store/Clock/Publisher/ListSession layers
 apps/server/src/store.ts          Drizzle repository/cache + idempotent domain operations
 apps/server/src/db/schema.ts       Drizzle SQLite table definitions
-apps/transport-contract/src/index.ts Shared oRPC/Zod wire contract and protocol errors
-apps/server/tests/smoke.test.ts   Vitest unit, migration, API, and realtime suite
+packages/transport-contract/src/index.ts Shared oRPC/Zod wire contract and protocol errors
+apps/server/tests/smoke.test.ts   Vitest unit, migration, and HTTP seam suite
+apps/server/tests/openapi.test.ts OpenAPI, SSE, documentation, and route-removal suite
 apps/server/package.json           backend workspace package
 apps/server/tsconfig.json          server-specific TypeScript configuration
 apps/server/tsconfig.test.json     server + test TypeScript configuration

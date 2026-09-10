@@ -21,6 +21,18 @@ function TestRouter({ children }: { children: ReactNode }) {
   return <Router hook={() => [location, setLocation]}>{children}</Router>;
 }
 
+/** Minimal oRPC fetch responses for the native transport. */
+function rpcResponse(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify({ json: value }), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function rpcNotFound(): Response {
+  return rpcResponse({ defined: false, code: 'NOT_FOUND', status: 404, message: 'The list no longer exists.' }, 404);
+}
+
 function renderPage(children: ReactNode) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(<QueryClientProvider client={queryClient}><TestRouter><>{children}<DialogHost /></></TestRouter></QueryClientProvider>);
@@ -34,7 +46,7 @@ describe('home and join page boundaries', () => {
 
   it('shows saved list summaries and removes a gone list after confirmation', async () => {
     useSavedListsStore.setState({ lists: [{ id: 'list-1', name: 'Groceries', ownerToken: null, joinedAt: 1 }] });
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rpcNotFound()));
     renderPage(<HomePage />);
 
     expect(await screen.findByText('This list was deleted or no longer exists — tap to remove it.')).toBeInTheDocument();
@@ -45,7 +57,7 @@ describe('home and join page boundaries', () => {
 
   it('creates a list and reports creation failures', async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ list: { id: 'list-2', name: 'Trip', createdAt: 2, revision: 0 }, ownerToken: 'owner' }) });
+      .mockResolvedValueOnce(rpcResponse({ list: { id: 'list-2', name: 'Trip', createdAt: 2, revision: 0 }, ownerToken: 'owner' }));
     vi.stubGlobal('fetch', fetchMock);
     renderPage(<HomePage />);
     fireEvent.click(screen.getByRole('button', { name: 'Create your first list' }));
@@ -66,7 +78,7 @@ describe('home and join page boundaries', () => {
   });
 
   it('joins a fetched list with a persisted display name', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => listResponse }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rpcResponse(listResponse)));
     useParticipantStore.setState({ identity: { clientId: 'client', name: '' } });
     renderPage(<JoinPage id="list-1" />);
 
@@ -78,7 +90,7 @@ describe('home and join page boundaries', () => {
   });
 
   it('explains an unavailable invite', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rpcNotFound()));
     renderPage(<JoinPage id="missing" />);
     expect(await screen.findByText("This invite is not valid — the list doesn't exist (anymore).")) .toBeInTheDocument();
   });

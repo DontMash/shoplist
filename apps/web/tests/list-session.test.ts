@@ -6,7 +6,7 @@ import {
   type SessionParticipant,
 } from '../src/lib/list-session';
 import { InMemoryListSessionTransport } from '../src/lib/test-transport';
-import { ApiError, createList, fetchList, responseFromSocket } from '../src/lib/api';
+import { ApiError, createList, fetchList } from '../src/lib/api';
 import type { ListResponse, ListResponseItem } from '../src/lib/api';
 
 const openSessions: ListSession[] = [];
@@ -31,6 +31,14 @@ async function sessionFor(transport: InMemoryListSessionTransport, extra: Record
 
 function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Minimal oRPC fetch response for tests that exercise the browser transport. */
+function rpcResponse(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify({ json: value }), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 function sent(transport: InMemoryListSessionTransport, kind: string) {
@@ -272,13 +280,16 @@ describe('list session', () => {
     expect(session.getSnapshot()).toMatchObject({ revision: 2, items: [{ id: 'rich' }] });
   });
 
-  it('notifies the server when a participant explicitly leaves', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ left: true }), { status: 200 }));
+  it('notifies the server about an explicit leave through the native transport', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(rpcResponse({ left: true }));
     vi.stubGlobal('fetch', fetchMock);
     const session = await sessionFor(new InMemoryListSessionTransport(snapshot()));
     await session.leave();
     expect(session.getStatus()).toBe('closed');
-    expect(fetchMock).toHaveBeenCalledWith('/api/lists/list/leave', expect.objectContaining({ method: 'POST' }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [request] = fetchMock.mock.calls[0] as [Request];
+    expect(request.url).toContain('/rpc/list/leave');
+    expect(request.method).toBe('POST');
     vi.unstubAllGlobals();
   });
 
@@ -316,27 +327,21 @@ describe('list session', () => {
     expect(missing.getSnapshot()).toMatchObject({ status: 'missing', outcome: { kind: 'missing' }, pending: false });
   });
 
-  it('normalizes REST and websocket responses while preserving query errors', async () => {
+  it('reads and creates lists through the native transport while preserving query errors', async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).includes('/api/lists/')) return new Response(JSON.stringify(snapshot()), { status: 200 });
-      expect(init?.method).toBe('POST');
-      return new Response(JSON.stringify({ list: { id: 'created', name: 'Created', createdAt: 1 }, ownerToken: 'owner' }), { status: 201 });
+    globalThis.fetch = (async (request: Request) => {
+      expect(request.method).toBe('POST');
+      if (request.url.endsWith('/rpc/list/get')) return rpcResponse(snapshot());
+      return rpcResponse({ list: { id: 'created', name: 'Created', createdAt: 1, revision: 0 }, ownerToken: 'owner' }, 201);
     }) as typeof fetch;
     await expect(fetchList('list')).resolves.toMatchObject({ list: { revision: 0 } });
     await expect(createList('Created')).resolves.toMatchObject({ ownerToken: 'owner' });
-    const normalized = responseFromSocket({
-      id: 'list', name: 'Socket', createdAt: 1, items: [], revision: 4,
-      members: [{ clientId: 'client-b', name: 'Bob', color: '#123' }],
-    }, { ...snapshot(), memberCount: 2 });
-    expect(normalized).toMatchObject({
-      list: { name: 'Socket', revision: 4 }, memberCount: 2,
-      members: [{ clientId: 'client-b', name: 'Bob' }],
-    });
-    globalThis.fetch = (async () => new Response('nope', { status: 404 })) as typeof fetch;
+
+    globalThis.fetch = (async () => rpcResponse({ defined: false, code: 'NOT_FOUND', status: 404, message: 'The list no longer exists.' }, 404)) as typeof fetch;
     await expect(fetchList('missing')).rejects.toMatchObject({ status: 404 });
-    globalThis.fetch = (async () => new Response('{', { status: 200 })) as typeof fetch;
-    await expect(fetchList('bad')).rejects.toThrow('invalid response');
+
+    globalThis.fetch = (async () => { throw new TypeError('fetch failed'); }) as typeof fetch;
+    await expect(fetchList('offline')).rejects.toMatchObject({ status: 0 });
     globalThis.fetch = originalFetch;
     expect(new ApiError(409).status).toBe(409);
   });

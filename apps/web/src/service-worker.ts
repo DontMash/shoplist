@@ -2,7 +2,6 @@
 
 import { cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute } from 'workbox-precaching';
 import { NavigationRoute, registerRoute } from 'workbox-routing';
-import { StaleWhileRevalidate } from 'workbox-strategies';
 import { notificationClickUrl } from './lib/notification-click';
 
 declare let self: ServiceWorkerGlobalScope & {
@@ -14,7 +13,6 @@ cleanupOutdatedCaches();
 registerRoute(new NavigationRoute(createHandlerBoundToURL('/index.html'), {
   denylist: [/^\/(?:api|rpc)(?:\/|$)/],
 }));
-registerRoute(({ url }) => url.pathname === '/api/qr', new StaleWhileRevalidate({ cacheName: 'shoplist-qr' }));
 
 self.addEventListener('push', (event) => {
   let payload: { title?: string; body?: string; url?: string; tag?: string } = {};

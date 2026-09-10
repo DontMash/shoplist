@@ -5,12 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
 import {
-  broadcast,
-  colorFor,
   createApp,
-  messageText,
-  onlineIn,
-  publicItem,
   sameOrigin,
   startServer,
   type RunningServer,
@@ -373,65 +368,40 @@ describe('Store', () => {
   });
 });
 
-describe('server helpers', () => {
-  it('handles protocol values, origins, presence, and broadcasts defensively', () => {
-    expect(messageText('plain text')).toBe('plain text');
-    expect(messageText(new TextEncoder().encode('bytes'))).toBe('bytes');
-    expect(messageText(new Uint8Array([97, 114, 114, 97, 121]))).toBe('array');
-    expect(messageText(new Uint8Array([97, 98]).buffer)).toBe('ab');
-    expect(messageText([111, 107])).toBe('ok');
-    expect(messageText({})).toBe('');
 
+describe('server helpers', () => {
+  it('validates browser origins and proxy forwarding', () => {
     const request = new Request('http://example.test/healthz', { headers: { host: 'example.test' } });
     expect(sameOrigin(request)).toBe(true);
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'http://example.test' } }))).toBe(true);
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'https://evil.example' } }))).toBe(false);
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'https://example.test' } }))).toBe(false);
-    expect(sameOrigin(new Request('http://internal.example/ws', {
+    expect(sameOrigin(new Request('http://internal.example/rpc', {
       headers: { host: 'example.test', origin: 'https://example.test', upgrade: 'websocket' },
     }))).toBe(true);
-    expect(sameOrigin(new Request('http://internal.example/ws', {
+    expect(sameOrigin(new Request('http://internal.example/rpc', {
       headers: { host: 'internal.example', origin: 'http://example.test', upgrade: 'websocket' },
     }))).toBe(false);
-    expect(sameOrigin(new Request('http://internal.example/ws', {
+    expect(sameOrigin(new Request('http://internal.example/rpc', {
       headers: { host: 'example.test', origin: 'https://evil.example', upgrade: 'websocket' },
     }))).toBe(false);
-    expect(sameOrigin(new Request('http://internal.example/ws', {
+    expect(sameOrigin(new Request('http://internal.example/rpc', {
       headers: { host: 'internal.example', origin: 'https://shoplist.example', upgrade: 'websocket' },
     }), 'https://shoplist.example')).toBe(true);
-    expect(sameOrigin(new Request('http://internal.example/ws', {
+    expect(sameOrigin(new Request('http://internal.example/rpc', {
       headers: { host: 'internal.example', origin: 'https://evil.example', upgrade: 'websocket' },
     }), 'https://shoplist.example')).toBe(false);
     expect(sameOrigin(new Request(request, { headers: { host: 'example.test', origin: 'not-a-url' } }))).toBe(false);
-
-    const first = { clientId: 'same', name: 'First', color: colorFor('same') };
-    const duplicate = { clientId: 'same', name: 'Second', color: colorFor('same') };
-    const other = { clientId: 'other', name: 'Other', color: colorFor('other') };
-    const firstSocket = { readyState: 1, send: vi.fn() };
-    const duplicateSocket = { readyState: 1, send: vi.fn() };
-    const otherSocket = { readyState: 0, send: vi.fn() };
-    const throwingSocket = { readyState: 1, send: vi.fn(() => { throw new Error('closed'); }) };
-    const room = new Map<any, any>([
-      [firstSocket, first], [duplicateSocket, duplicate], [otherSocket, other], [throwingSocket, other],
-    ]);
-    const rooms = new Map<string, Map<any, any>>([['room', room]]);
-    expect(onlineIn(rooms, 'missing')).toEqual([]);
-    expect(onlineIn(rooms, 'room')).toEqual([first, other]);
-    broadcast(rooms, 'missing', { t: 'noop' });
-    broadcast(rooms, 'room', { t: 'state' }, firstSocket as any);
-    expect(duplicateSocket.send).toHaveBeenCalledWith('{"t":"state"}');
-    expect(otherSocket.send).not.toHaveBeenCalled();
-    expect(throwingSocket.send).toHaveBeenCalled();
-    broadcast(rooms, 'room', { t: 'state' }, undefined);
-    expect(firstSocket.send).toHaveBeenCalledTimes(1);
-
-    const item = { id: 'item', name: 'Item', amount: '', collected: false, createdAt: 1, updatedAt: 1, by: null, lastEditedBy: null,
-      shopped: true };
-    expect(publicItem(item)).not.toHaveProperty('shopped');
+    expect(sameOrigin(new Request('http://internal.example/healthz', {
+      headers: { host: 'internal.example', origin: 'https://shoplist.example', 'x-forwarded-host': 'shoplist.example', 'x-forwarded-proto': 'https' },
+    }))).toBe(true);
+    expect(sameOrigin(new Request('http://internal.example/healthz', {
+      headers: { host: 'internal.example', origin: 'https://shoplist.example', 'x-forwarded-host': 'shoplist.example', 'x-forwarded-proto': 'ftp' },
+    }))).toBe(false);
   });
 });
 
-describe('Hono API and realtime server', () => {
+describe('Hono application and native realtime boundaries', () => {
   let directory: string;
   let running: RunningServer;
   let base: string;
@@ -462,34 +432,19 @@ describe('Hono API and realtime server', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it('uses default app paths and turns route failures into safe errors', async () => {
+  it('uses default app paths and turns unhandled failures into safe errors', async () => {
     const dataDirectory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-defaults-'));
     const previousDataDir = process.env.DATA_DIR;
     const previousPublicDir = process.env.PUBLIC_DIR;
     process.env.DATA_DIR = dataDirectory;
     delete process.env.PUBLIC_DIR;
     const resources = createApp();
-    const tooLarge = await resources.app.request('/api/lists', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'content-length': '1' },
-      body: 'x'.repeat(17 * 1024),
-    });
-    expect(tooLarge.status).toBe(413);
-    const emptyBody = await resources.app.request('/api/lists', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: '',
-    });
-    expect(emptyBody.status).toBe(201);
+    expect((await resources.app.request('/healthz')).status).toBe(200);
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(resources.store, 'createList').mockImplementation(() => {
+    vi.spyOn(resources.store, 'listCount').mockImplementation(() => {
       throw new Error('test failure');
     });
-    const response = await resources.app.request('/api/lists', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'will fail' }),
-    });
+    const response = await resources.app.request('/healthz');
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: 'internal error' });
     expect(error).toHaveBeenCalled();
@@ -502,7 +457,7 @@ describe('Hono API and realtime server', () => {
     else process.env.PUBLIC_DIR = previousPublicDir;
   });
 
-  it('serves the health endpoint and validates REST requests', async () => {
+  it('serves health, the frontend shell, and the OpenAPI transport', async () => {
     const health = await fetch(`${base}/healthz`);
     expect(health.status).toBe(200);
     expect(health.headers.get('content-security-policy')).toContain("default-src 'none'");
@@ -513,11 +468,20 @@ describe('Hono API and realtime server', () => {
     expect(shell.status).toBe(200);
     expect(await shell.text()).toContain('<title>Shoplist</title>');
     expect((await fetch(`${base}/..%2f..%2fserver.js`)).status).toBeGreaterThanOrEqual(400);
-    expect((await fetch(`${base}/api/lists`, { method: 'PUT' })).status).toBe(405);
-    expect((await fetch(`${base}/api/lists`, { method: 'GET' })).status).toBe(405);
-    expect((await fetch(`${base}/api/unknown`, { method: 'GET' })).status).toBe(405);
-    expect((await fetch(`${base}/api/lists`, { method: 'POST', headers: { origin: 'https://evil.example' } })).status).toBe(403);
-    const forwardedCreate = await fetch(`${base}/api/lists`, {
+
+    // Removed legacy routes fail explicitly instead of serving the frontend shell.
+    const legacy = await fetch(`${base}/api/lists`);
+    expect(legacy.status).toBe(404);
+    expect(await legacy.json()).toEqual({ error: 'procedure not found' });
+    expect((await fetch(`${base}/api/qr?data=invite`)).status).toBe(404);
+
+    // The OpenAPI surface keeps the same origin policy as the native transport.
+    expect((await fetch(`${base}/api/list/create`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'https://evil.example' },
+      body: JSON.stringify({ name: 'Rejected' }),
+    })).status).toBe(403);
+    const forwardedCreate = await fetch(`${base}/api/list/create`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -528,254 +492,54 @@ describe('Hono API and realtime server', () => {
       body: JSON.stringify({ name: 'Forwarded list' }),
     });
     expect(forwardedCreate.status).toBe(201);
-    expect((await fetch(`${base}/api/lists`, { method: 'POST' })).status).toBe(415);
-    expect((await fetch(`${base}/api/lists`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{',
-    })).status).toBe(400);
-    expect((await fetch(`${base}/api/lists`, {
-      method: 'POST', headers: { 'content-type': 'application/json', origin: base }, body: '[]',
-    })).status).toBe(201);
-    expect((await fetch(`${base}/api/lists`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'x'.repeat(17 * 1024) }),
-    })).status).toBe(413);
-
-    const response = await fetch(`${base}/api/lists`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'Test list' }),
-    });
-    expect(response.status).toBe(201);
-    const created = await response.json() as { list: { id: string; name: string }; ownerToken: string };
-    expect(created.list.name).toBe('Test list');
+    const created = await forwardedCreate.json() as { list: { id: string; name: string }; ownerToken: string };
+    expect(created.list.name).toBe('Forwarded list');
     expect(created.ownerToken).toHaveLength(16);
 
-    const listResponse = await fetch(`${base}/api/lists/${created.list.id}`);
-    expect(listResponse.status).toBe(200);
-    expect(await listResponse.json()).toMatchObject({ list: { id: created.list.id }, items: [], members: [], memberCount: 0 });
-    expect((await fetch(`${base}/api/lists/bad`)).status).toBe(404);
-    expect((await fetch(`${base}/api/lists/not-a-list`)).status).toBe(404);
+    const fetched = await fetch(`${base}/api/list/get`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: created.list.id }),
+    });
+    expect(fetched.status).toBe(200);
+    expect(await fetched.json()).toMatchObject({ list: { id: created.list.id }, items: [], members: [], memberCount: 0 });
+    expect((await fetch(`${base}/api/list/get`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'missing-list' }),
+    })).status).toBe(404);
+    expect((await fetch(`${base}/api/unknown`, { method: 'POST' })).status).toBe(404);
 
-    const qr = await fetch(`${base}/api/qr?data=${encodeURIComponent(`${base}/#/join/${created.list.id}`)}`);
-    expect(qr.status).toBe(200);
-    expect(qr.headers.get('content-type')).toContain('image/svg+xml');
-    expect(await qr.text()).toContain('<svg');
-    expect((await fetch(`${base}/api/qr`)).status).toBe(400);
-    expect((await fetch(`${base}/api/qr?data=${'x'.repeat(513)}`)).status).toBe(400);
-    expect((await fetch(`${base}/api/qr?data=${'x'.repeat(512)}`)).status).toBe(200);
     expect((await fetch(`${base}/favicon.ico`, { redirect: 'manual' })).status).toBe(302);
     expect((await fetch(`${base}/does-not-exist`)).status).toBe(404);
+    expect((await fetch(`${base}/does-not-exist`, { method: 'POST' })).status).toBe(405);
   });
 
-  it('rejects websocket connections for unknown lists and missing clients', async () => {
-    const unknownCode = await new Promise<number>((resolve) => {
-      const socket = new WebSocket(`${wsBase}/ws?list=unknown-list&client=x&name=X`);
-      socket.once('close', (closeCode) => resolve(closeCode));
-      socket.once('error', () => { /* the close event carries the protocol code */ });
-    });
-    expect(unknownCode).toBe(4004);
-
-    const created = await (await fetch(`${base}/api/lists`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Client validation' }),
+  it('accepts forwarded websocket origins for the native transport', async () => {
+    const created = await (await fetch(`${base}/api/list/create`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Forwarded websocket' }),
     })).json() as { list: { id: string } };
-    const missingListCode = await new Promise<number>((resolve) => {
-      const socket = new WebSocket(`${wsBase}/ws?client=x&name=X`);
-      socket.once('close', (closeCode) => resolve(closeCode));
-      socket.once('error', () => { /* the close event carries the protocol code */ });
+    expect(created.list.id).toBeTruthy();
+
+    const socket = new WebSocket(`${wsBase}/rpc`, {
+      headers: { Host: 'shoplist.example', Origin: 'https://shoplist.example' },
     });
-    expect(missingListCode).toBe(4004);
-
-    const missingClientCode = await new Promise<number>((resolve) => {
-      const socket = new WebSocket(`${wsBase}/ws?list=${created.list.id}&name=X`);
-      socket.once('close', (closeCode) => resolve(closeCode));
-      socket.once('error', () => { /* the close event carries the protocol code */ });
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve());
+      socket.once('error', reject);
     });
-    expect(missingClientCode).toBe(4004);
-  });
-
-  it('accepts websocket origins when a TLS proxy omits forwarded scheme', async () => {
-    const created = await (await fetch(`${base}/api/lists`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Forwarded websocket' }),
-    })).json() as { list: { id: string } };
-    const client = await connect(`${wsBase}/ws?list=${created.list.id}&client=forwarded&name=Proxy`, {
-      Host: 'shoplist.example',
-      Origin: 'https://shoplist.example',
-    });
-    await waitFor(client.messages, (message) => message.t === 'init');
-    await close(client.socket);
-  });
-
-  it('handles websocket validation, every operation, and room cleanup', async () => {
-    const created = await (await fetch(`${base}/api/lists`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Operations' }),
-    })).json() as { list: { id: string }; ownerToken: string };
-    const clientA = await connect(`${wsBase}/ws?list=${created.list.id}&client=guest&name=%20`);
-    const clientB = await connect(`${wsBase}/ws?list=${created.list.id}&client=guest&name=Updated`);
-    await waitFor(clientA.messages, (message) => message.t === 'init');
-    await waitFor(clientB.messages, (message) => message.t === 'init');
-
-    clientA.socket.send(JSON.stringify({}));
-    clientA.socket.send(JSON.stringify({ t: 42 }));
-    clientA.socket.send(JSON.stringify({ t: 'item:add', item: 'not-an-object' }));
-    clientA.socket.send(JSON.stringify({ t: 'item:update' }));
-    clientA.socket.send(JSON.stringify({ t: 'item:update', id: 'missing', patch: 'not-an-object' }));
-    clientA.socket.send(JSON.stringify({ t: 'item:delete' }));
-    clientA.socket.send(JSON.stringify({ t: 'item:delete', id: 'missing' }));
-    clientA.socket.send(JSON.stringify({ t: 'unknown-operation' }));
-    clientA.socket.send(JSON.stringify({ t: 'item:add', item: { name: 'Eggs' } }));
-    const addState = await waitFor(clientB.messages, (message) => message.t === 'state' && message.list.items.length === 1);
-    const itemId = addState.list.items[0].id as string;
-
-    clientA.socket.send(JSON.stringify({ t: 'item:update', id: itemId, patch: {
-      name: '  Free range eggs ', amount: '6', collected: true,
-    } }));
-    const updateState = await waitFor(clientB.messages, (message) => message.t === 'state' && message.list.items[0]?.collected);
-    expect(updateState.list.items[0]).toMatchObject({ name: 'Free range eggs', amount: '6', collected: true, lastEditedBy: 'guest' });
-    clientA.socket.send(JSON.stringify({ t: 'item:update', id: itemId, patch: { name: ' ' } }));
-    clientA.socket.send(JSON.stringify({ t: 'list:rename', name: ' ' }));
-    clientA.socket.send(JSON.stringify({ t: 'list:rename', name: 'Renamed operations' }));
-    expect((await waitFor(clientB.messages, (message) => message.t === 'state' && message.list.name === 'Renamed operations')).list.name)
-      .toBe('Renamed operations');
-
-    clientA.socket.send(JSON.stringify({ t: 'list:clear' }));
-    expect((await waitFor(clientB.messages, (message) => message.t === 'state' && message.list.items.length === 0)).list.items)
-      .toEqual([]);
-    clientA.socket.send(JSON.stringify({ t: 'item:delete', id: itemId }));
-    clientA.socket.send(JSON.stringify({ t: 'list:delete', ownerToken: 'wrong' }));
-    await waitFor(clientA.messages, (message) => message.t === 'error');
-    await close(clientA.socket);
-    expect((await waitFor(clientB.messages, (message) => message.t === 'presence' && message.online.length === 1)).online)
-      .toHaveLength(1);
-    await close(clientB.socket);
-    expect(running.rooms.has(created.list.id)).toBe(false);
-
-    const deleted = await (await fetch(`${base}/api/lists`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Deleted during message' }),
-    })).json() as { list: { id: string } };
-    const deletedClient = await connect(`${wsBase}/ws?list=${deleted.list.id}&client=delete-me&name=Guest`);
-    await waitFor(deletedClient.messages, (message) => message.t === 'init');
-    running.store.deleteList(deleted.list.id);
-    deletedClient.socket.send(JSON.stringify({ t: 'ping' }));
-    const closeCode = await new Promise<number>((resolve) => deletedClient.socket.once('close', resolve));
-    expect(closeCode).toBe(4004);
-  });
-
-  it('acknowledges identified operations and deduplicates replay', async () => {
-    const created = await (await fetch(`${base}/api/lists`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Identified' }),
-    })).json() as { list: { id: string }; ownerToken: string };
-    const client = await connect(`${wsBase}/ws?list=${created.list.id}&client=identified&name=Guest`);
-    await waitFor(client.messages, (message) => message.t === 'init' && message.list.revision === 0);
-    client.socket.send(JSON.stringify({ t: 'item:add', opId: 'identified-add', tempId: 'tmp-1', item: { name: 'Eggs' } }));
-    const ack = await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-add');
-    expect(ack).toMatchObject({ status: 'accepted', revision: 1, tempItemId: 'tmp-1', item: { name: 'Eggs' } });
-    const state = await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 1);
-    const itemId = state.list.items[0].id;
-    client.socket.send(JSON.stringify({ t: 'item:add', opId: 'identified-add', tempId: 'tmp-1', item: { name: 'Duplicate' } }));
-    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-add')).toEqual(ack);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(client.messages.some((message) => message.t === 'state' && message.list.revision === 2)).toBe(false);
-
-    client.socket.send(JSON.stringify({ t: 'operation', operationId: 'identified-update', kind: 'item:update', payload: {
-      id: itemId, patch: { collected: true },
-    } }));
-    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-update'))
-      .toMatchObject({ status: 'accepted', revision: 2 });
-    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 2);
-    client.socket.send(JSON.stringify({ t: 'list:delete', opId: 'identified-delete', ownerToken: 'wrong' }));
-    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-delete'))
-      .toMatchObject({ status: 'rejected', reason: 'not-owner', reasonCode: 'not-owner', revision: 2 });
-
-    client.socket.send(JSON.stringify({ t: 'operation', opId: 'identified-invalid', kind: 'unknown', payload: {} }));
-    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-invalid'))
-      .toMatchObject({ status: 'rejected', reason: 'invalid-operation', revision: 2 });
-    client.socket.send(JSON.stringify({ t: 'item:add', opId: 'x'.repeat(161), item: { name: 'Too large' } }));
-    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'x'.repeat(161)))
-      .toMatchObject({ status: 'rejected', reason: 'operation-too-large', revision: 2 });
-    client.socket.send(JSON.stringify({ t: 'item:update', opId: 'identified-compact-update', id: itemId, patch: { amount: '1' } }));
-    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-compact-update'))
-      .toMatchObject({ status: 'accepted', revision: 3 });
-    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 3);
-    client.socket.send(JSON.stringify({ t: 'item:delete', opId: 'identified-item-delete', id: itemId }));
-    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-item-delete'))
-      .toMatchObject({ status: 'accepted', revision: 4 });
-    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 4);
-    client.socket.send(JSON.stringify({ t: 'list:clear', opId: 'identified-clear' }));
-    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-clear'))
-      .toMatchObject({ status: 'accepted', revision: 5 });
-    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 5);
-    client.socket.send(JSON.stringify({ t: 'list:rename', opId: 'identified-rename', name: 'Renamed' }));
-    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-rename'))
-      .toMatchObject({ status: 'accepted', revision: 6 });
-    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 6);
-    client.socket.send(JSON.stringify({ t: 'operation', opId: 'identified-generic-add', kind: 'item:add', payload: {
-      item: { name: 'Bread' }, tempItemId: 'temp-generic',
-    } }));
-    expect(await waitFor(client.messages, (message) => message.t === 'ack' && message.opId === 'identified-generic-add'))
-      .toMatchObject({ status: 'accepted', revision: 7, tempItemId: 'temp-generic' });
-    await waitFor(client.messages, (message) => message.t === 'state' && message.list.revision === 7);
-    await close(client.socket);
-  });
-
-  it('syncs list operations between websocket clients and enforces ownership', async () => {
-    const created = await (await fetch(`${base}/api/lists`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Realtime' }),
-    })).json() as { list: { id: string }; ownerToken: string };
-
-    const clientA = await connect(`${wsBase}/ws?list=${created.list.id}&client=a&name=Alice`);
-    const clientB = await connect(`${wsBase}/ws?list=${created.list.id}&client=b&name=Bob`);
-    expect((await waitFor(clientA.messages, (message) => message.t === 'init')).list.items).toEqual([]);
-    await waitFor(clientB.messages, (message) => message.t === 'init');
-    expect((await waitFor(clientA.messages, (message) => message.t === 'presence' &&
-      message.online.some((person: Message) => person.clientId === 'b'))).online)
-      .toEqual(expect.arrayContaining([expect.objectContaining({ clientId: 'b', name: 'Bob' })]));
-
-    clientA.socket.send(JSON.stringify({ t: 'item:add', item: { name: 'Milk', amount: '2 L' } }));
-    const state = await waitFor(clientB.messages, (message) => message.t === 'state' && message.list.items.length === 1);
-    expect(state.list.items[0]).toMatchObject({ name: 'Milk', amount: '2 L', lastEditedBy: 'a' });
-    const itemId = state.list.items[0].id as string;
-
-    clientB.socket.send(JSON.stringify({ t: 'item:update', id: itemId, patch: { collected: true } }));
-    expect((await waitFor(clientA.messages, (message) => message.t === 'state' && message.list.items[0]?.collected)).list.items[0].collected).toBe(true);
-
-    clientB.socket.send('not json');
-    clientB.socket.send(JSON.stringify({ t: 'ping' }));
-    expect((await waitFor(clientB.messages, (message) => message.t === 'pong')).t).toBe('pong');
-
-    clientA.socket.send(JSON.stringify({ t: 'list:delete', ownerToken: 'wrong' }));
-    expect((await waitFor(clientA.messages, (message) => message.t === 'error')).message).toContain('Only');
-    expect((await fetch(`${base}/api/lists/${created.list.id}`)).status).toBe(200);
-
-    clientA.socket.send(JSON.stringify({ t: 'list:delete', ownerToken: created.ownerToken }));
-    expect((await waitFor(clientB.messages, (message) => message.t === 'closed')).reason).toBe('deleted');
-    expect((await fetch(`${base}/api/lists/${created.list.id}`)).status).toBe(404);
-    await close(clientA.socket);
-    await close(clientB.socket);
+    await close(socket);
   });
 });
 
-type Message = Record<string, any>;
-type Client = { socket: WebSocket; messages: Message[] };
-
-function connect(url: string, headers: Record<string, string> = {}): Promise<Client> {
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url, { headers });
-    const messages: Message[] = [];
-    socket.on('message', (data) => {
-      try { messages.push(JSON.parse(data.toString()) as Message); } catch { /* ignore */ }
-    });
-    socket.once('error', reject);
-    socket.once('open', () => resolve({ socket, messages }));
+function close(socket: WebSocket): Promise<void> {
+  return new Promise((resolve) => {
+    if (socket.readyState === WebSocket.CLOSED) return resolve();
+    socket.once('close', () => resolve());
+    socket.close();
   });
-}
-
-async function waitFor(messages: Message[], predicate: (message: Message) => boolean): Promise<Message> {
-  const start = Date.now();
-  while (Date.now() - start < 3000) {
-    const index = messages.findIndex(predicate);
-    if (index !== -1) return messages.splice(0, index + 1).pop() as Message;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`Timed out waiting for message: ${messages.map((message) => message.t).join(', ')}`);
 }
 
 async function fileExists(file: string): Promise<boolean> {
@@ -785,12 +549,4 @@ async function fileExists(file: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function close(socket: WebSocket): Promise<void> {
-  return new Promise((resolve) => {
-    if (socket.readyState === WebSocket.CLOSED) return resolve();
-    socket.once('close', () => resolve());
-    socket.close();
-  });
 }

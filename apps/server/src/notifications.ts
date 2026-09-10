@@ -48,10 +48,6 @@ export function notificationPayload(event: NotificationEvent): NotificationPaylo
   };
 }
 
-export function onlineClientIds(rooms: Map<string, Map<unknown, { clientId: string }>>, listId: string): Set<string> {
-  return new Set([...rooms.get(listId)?.values() || []].map((client) => client.clientId));
-}
-
 export async function sendNotification(
   store: Store,
   sender: PushSender | undefined,

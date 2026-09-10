@@ -10,10 +10,12 @@ RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json vitest.config.ts ./
 COPY apps/web/package.json apps/web/package.json
 COPY apps/server/package.json apps/server/package.json
+COPY packages/transport-contract/package.json packages/transport-contract/package.json
 RUN pnpm install --frozen-lockfile
 
 COPY apps/web ./apps/web
 COPY apps/server ./apps/server
+COPY packages/transport-contract ./packages/transport-contract
 RUN pnpm --filter @shoplist/server build
 RUN pnpm --filter @shoplist/web build
 

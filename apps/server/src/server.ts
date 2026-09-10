@@ -1,31 +1,23 @@
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Hono, type Context, type Next } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { serve, upgradeWebSocket, type ServerType } from '@hono/node-server';
-import { RPCHandler as FetchRPCHandler } from '@orpc/server/fetch';
+import { RPCHandler as FetchRPCHandler, BodyLimitPlugin } from '@orpc/server/fetch';
 import { RPCHandler as WebSocketRPCHandler } from '@orpc/server/ws';
+import { OpenAPIHandler } from '@orpc/openapi/fetch';
+import { Scalar } from '@scalar/hono-api-reference';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { WebSocketServer } from 'ws';
-import QRCode from 'qrcode';
-import {
-  cleanText,
-  rid,
-  Store,
-  type ShoppingItem,
-  type ShoppingList,
-  type StoreOperation,
-  type OperationKind,
-} from './store.js';
-import type { WSContext } from 'hono/ws';
-import { NotificationDispatcher, onlineClientIds, WebPushSender, type NotificationEvent, type PushSender } from './notifications.js';
+import { Store } from './store.js';
+import { NotificationDispatcher, WebPushSender, type PushSender } from './notifications.js';
 import { loadServerEnv, type ServerEnv } from './env.js';
 import { createRpcRouter, RpcEventPublisher, RpcSessionRegistry } from './rpc.js';
+import { OPENAPI_SERVER_URL, OPENAPI_TITLE, openApiDocument } from './openapi.js';
 
 const SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BUILT_DIR = path.resolve(SERVER_DIR, '../web/dist');
-const LIST_ID = /^[A-Za-z0-9_-]{4,40}$/;
-const BODY_LIMIT = 16 * 1024;
 
 function safeBuildId(value: string | undefined): string {
   return value && /^[A-Za-z0-9._-]{1,128}$/.test(value) ? value : 'unknown';
@@ -43,6 +35,30 @@ export const BASE_HEADERS = {
   'X-Frame-Options': 'DENY',
 } as const;
 
+/**
+ * Content-Security-Policy for the Scalar documentation page only.
+ *
+ * Scalar loads its standalone bundle from a pinned CDN and initializes it with
+ * an inline script, so the page needs a nonce and the CDN origin. Scalar also
+ * renders inline `style="..."` attributes, which a nonce cannot authorize, so
+ * inline styles are allowed on this route. Every other route keeps `CSP`.
+ */
+export function docsContentSecurityPolicy(nonce: string): string {
+  return "default-src 'none'; " +
+    `script-src 'nonce-${nonce}' 'self' https://cdn.jsdelivr.net; ` +
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
+    "img-src 'self' data: https://cdn.jsdelivr.net; font-src 'self' data: https://cdn.jsdelivr.net; " +
+    "connect-src 'self' https://cdn.jsdelivr.net; manifest-src 'self'; " +
+    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+}
+
+/** Explicit event-stream behavior for the OpenAPI fetch handler. */
+export interface EventStreamOptions {
+  keepAliveEnabled?: boolean;
+  keepAliveIntervalMs?: number;
+  initialCommentEnabled?: boolean;
+}
+
 export interface AppOptions {
   dataFile?: string;
   publicDir?: string;
@@ -52,26 +68,17 @@ export interface AppOptions {
   pushPublicKey?: string;
   pushSender?: PushSender;
   notificationCoalesceMs?: number;
+  eventStream?: EventStreamOptions;
 }
 
 export interface ShoplistApp {
   app: Hono;
   store: Store;
-  rooms: Rooms;
   rpcPublisher: RpcEventPublisher;
   rpcSessions: RpcSessionRegistry;
   buildId: string;
   dispatcher: NotificationDispatcher;
 }
-interface ClientInfo {
-  clientId: string;
-  name: string;
-  color: string;
-}
-
-type Socket = WSContext;
-type Room = Map<Socket, ClientInfo>;
-type Rooms = Map<string, Room>;
 
 export interface StartOptions extends AppOptions {
   port?: number;
@@ -82,151 +89,6 @@ export interface StartOptions extends AppOptions {
 export interface RunningServer extends ShoplistApp {
   server: ServerType;
   close: () => Promise<void>;
-}
-
-const PALETTE = [
-  '#e11d48', '#0284c7', '#7c3aed', '#ea580c',
-  '#0d9488', '#c026d3', '#4f46e5', '#65a30d',
-];
-
-export function colorFor(clientId: string): string {
-  let hash = 0;
-  for (let index = 0; index < clientId.length; index += 1) {
-    hash = (hash * 31 + clientId.charCodeAt(index)) >>> 0;
-  }
-  return PALETTE[hash % PALETTE.length];
-}
-
-export function publicItem(item: ShoppingItem): ShoppingItem {
-  // Do not leak a removed legacy status even if a database is inspected before
-  // its migration save runs.
-  const copy = { ...item } as ShoppingItem & { shopped?: unknown };
-  delete copy.shopped;
-  return copy;
-}
-
-function publicMembers(list: ShoppingList): ClientInfo[] {
-  return Object.values(list.members).map(({ clientId, name, color }) => ({ clientId, name, color }));
-}
-
-function listPayload(list: ShoppingList) {
-  return {
-    id: list.id,
-    name: list.name,
-    createdAt: list.createdAt,
-    revision: list.revision,
-    items: list.items.map(publicItem),
-    members: publicMembers(list),
-  };
-}
-
-export function onlineIn(rooms: Rooms, listId: string): ClientInfo[] {
-  const room = rooms.get(listId);
-  if (!room) return [];
-  const seen = new Set<string>();
-  const online: ClientInfo[] = [];
-  for (const info of room.values()) {
-    if (seen.has(info.clientId)) continue;
-    seen.add(info.clientId);
-    online.push(info);
-  }
-  return online;
-}
-
-export function broadcast(rooms: Rooms, listId: string, message: unknown, except?: Socket): void {
-  const room = rooms.get(listId);
-  if (!room) return;
-  const data = JSON.stringify(message);
-  for (const socket of room.keys()) {
-    if (socket === except || socket.readyState !== 1) continue;
-    try {
-      socket.send(data);
-    } catch {
-      // A connection can close between the ready-state check and send.
-    }
-  }
-}
-
-function pushState(rooms: Rooms, list: ShoppingList, actor?: ClientInfo): void {
-  // Full-state sync keeps clients trivially consistent. Broadcast to the
-  // actor as well: it is useful for resolving optimistic local changes.
-  broadcast(rooms, list.id, {
-    t: 'state',
-    list: listPayload(list),
-    actor: actor ? { clientId: actor.clientId, name: actor.name } : null,
-  });
-}
-
-function pushPresence(rooms: Rooms, listId: string, members: ClientInfo[] = []): void {
-  broadcast(rooms, listId, {
-    t: 'presence',
-    online: onlineIn(rooms, listId),
-    members,
-  });
-}
-
-function closeDeletedRoom(rooms: Rooms, listId: string): void {
-  broadcast(rooms, listId, { t: 'closed', reason: 'deleted' });
-  for (const roomSocket of rooms.get(listId)?.keys() || []) {
-    try { roomSocket.close(1000, 'list-deleted'); } catch { /* noop */ }
-  }
-  rooms.delete(listId);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
-}
-
-const OPERATION_KINDS: OperationKind[] = [
-  'item:add', 'item:update', 'item:delete', 'list:clear', 'list:rename', 'list:delete',
-];
-
-/** Convert both the current compact wire format and the generic envelope. */
-function operationFromMessage(message: Record<string, unknown>, clientId: string, actorName = 'Someone'): StoreOperation | null {
-  const operationId = typeof message.opId === 'string'
-    ? message.opId
-    : typeof message.operationId === 'string' ? message.operationId : '';
-  if (!operationId) return null;
-
-  let kind: OperationKind | undefined;
-  let payload: Record<string, unknown> = {};
-  if (message.t === 'operation') {
-    kind = typeof message.kind === 'string' && OPERATION_KINDS.includes(message.kind as OperationKind)
-      ? message.kind as OperationKind : undefined;
-    payload = isRecord(message.payload) ? message.payload : {};
-    if (kind === 'item:add' && isRecord(payload.item)) {
-      payload = {
-        ...payload.item,
-        tempItemId: payload.tempItemId || payload.tempId,
-      };
-    }
-  } else if (typeof message.t === 'string' && OPERATION_KINDS.includes(message.t as OperationKind)) {
-    kind = message.t as OperationKind;
-    payload = {};
-    if (kind === 'item:add') {
-      payload = isRecord(message.item) ? { ...message.item } : {};
-      if (typeof message.tempId === 'string') payload.tempItemId = message.tempId;
-      if (typeof message.tempItemId === 'string') payload.tempItemId = message.tempItemId;
-    } else if (kind === 'item:update') {
-      payload = { id: message.id, patch: isRecord(message.patch) ? message.patch : {} };
-    } else if (kind === 'item:delete') {
-      payload = { id: message.id };
-    } else if (kind === 'list:rename') {
-      payload = { name: message.name };
-    } else if (kind === 'list:delete') {
-      payload = { ownerToken: message.ownerToken };
-    }
-  }
-  if (!kind) return null;
-  return { operationId, kind, payload, actorClientId: clientId, actorName };
-}
-
-export function messageText(data: unknown): string {
-  if (typeof data === 'string') return data;
-  if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
-  if (data instanceof Uint8Array) return new TextDecoder().decode(data);
-  if (Array.isArray(data)) return new TextDecoder().decode(Uint8Array.from(data));
-  return '';
 }
 
 function firstHeaderValue(value: string | null): string | null {
@@ -278,35 +140,6 @@ function json(c: Context, status: number, body: unknown, cache = 'no-store'): Re
   return c.json(body, status as ContentfulStatusCode);
 }
 
-async function readJsonBody(c: Context): Promise<Record<string, unknown>> {
-  const contentLength = Number(c.req.header('content-length') || 0);
-  if (contentLength > BODY_LIMIT) throw new Error('body too large');
-  const text = await c.req.text();
-  if (Buffer.byteLength(text, 'utf8') > BODY_LIMIT) throw new Error('body too large');
-  const parsed: unknown = JSON.parse(text || '{}');
-  return isRecord(parsed) ? parsed : {};
-}
-
-function requestClientId(value: unknown): string | null {
-  const clientId = cleanText(value, 64);
-  return clientId || null;
-}
-
-function requestSubscription(value: unknown): { endpoint: string; keys: { p256dh: string; auth: string } } | null {
-  if (!isRecord(value) || typeof value.endpoint !== 'string' || !isRecord(value.keys)) return null;
-  const endpoint = value.endpoint.trim();
-  const p256dh = typeof value.keys.p256dh === 'string' ? value.keys.p256dh.trim() : '';
-  const auth = typeof value.keys.auth === 'string' ? value.keys.auth.trim() : '';
-  if (!endpoint || endpoint.length > 2048 || !p256dh || p256dh.length > 512 || !auth || auth.length > 512) return null;
-  try {
-    const parsed = new URL(endpoint);
-    if (parsed.protocol !== 'https:') return null;
-  } catch {
-    return null;
-  }
-  return { endpoint, keys: { p256dh, auth } };
-}
-
 function sameOriginMiddleware(publicOrigin?: string) {
   return async (c: Context, next: Next): Promise<Response | void> => {
     if (!sameOrigin(c.req.raw, publicOrigin)) return json(c, 403, { error: 'bad origin' });
@@ -320,7 +153,6 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
   const publicOrigin = options.publicOrigin ?? environment.PUBLIC_ORIGIN;
   const buildId = safeBuildId(options.buildId ?? environment.BUILD_SHA);
   const store = options.store || new Store(dataFile);
-  const rooms: Rooms = new Map();
   const configuredPushPublicKey = options.pushPublicKey ?? environment.VAPID_PUBLIC_KEY ?? '';
   const pushSender = options.pushSender || (
     environment.VAPID_PUBLIC_KEY && environment.VAPID_PRIVATE_KEY && environment.VAPID_SUBJECT
@@ -328,11 +160,13 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
       : undefined
   );
   const pushPublicKey = pushSender ? configuredPushPublicKey : '';
-  const dispatcher = new NotificationDispatcher(store, pushSender, (listId) => onlineClientIds(rooms, listId), {
-    coalesceMs: options.notificationCoalesceMs,
-  });
   const rpcPublisher = new RpcEventPublisher();
   const rpcSessions = new RpcSessionRegistry();
+  // Online list-session participants are tracked by the native transport and
+  // shared with notification delivery so an active participant is not pushed.
+  const dispatcher = new NotificationDispatcher(store, pushSender, (listId) => rpcSessions.onlineClientIds(listId), {
+    coalesceMs: options.notificationCoalesceMs,
+  });
   const rpcRouter = createRpcRouter({
     store,
     publisher: rpcPublisher,
@@ -342,6 +176,19 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
   });
   const rpcHttpHandler = new FetchRPCHandler(rpcRouter);
   const rpcWebSocketHandler = new WebSocketRPCHandler(rpcRouter);
+  // One router, two transports: the native oRPC handler and the OpenAPI
+  // handler both invoke the same procedures, so behavior cannot drift.
+  const openApiHandler = new OpenAPIHandler(rpcRouter, {
+    // The removed compatibility routes enforced this body limit; keep the
+    // OpenAPI transport bounded as well.
+    plugins: [new BodyLimitPlugin({ maxBodySize: 16 * 1024 })],
+    // Event-stream behavior is explicit: flush headers with an initial
+    // comment, keep idle streams alive, and let cancellation end the
+    // iterator. Empty streams complete normally.
+    eventIteratorKeepAliveEnabled: options.eventStream?.keepAliveEnabled ?? true,
+    eventIteratorKeepAliveInterval: options.eventStream?.keepAliveIntervalMs ?? 5_000,
+    eventIteratorInitialCommentEnabled: options.eventStream?.initialCommentEnabled ?? true,
+  });
   const app = new Hono();
 
   app.use('*', async (c, next) => {
@@ -356,9 +203,9 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
 
   app.get('/healthz', (c) => json(c, 200, { ok: true, lists: store.listCount(), build: buildId }));
 
-  // One logical endpoint serves unary oRPC calls over HTTP. The WebSocket
-  // upgrade below uses the same prefix and router, but keeps a separate oRPC
-  // handler because the wire framing differs from fetch.
+  // Native oRPC transport. One logical endpoint serves unary calls over HTTP;
+  // the WebSocket upgrade below uses the same prefix and router, but keeps a
+  // separate oRPC handler because the wire framing differs from fetch.
   const rpcUpgrade = sameOriginMiddleware(publicOrigin);
   const rpcWebSocketRoute = upgradeWebSocket((c) => ({
     onOpen(_event, socket) {
@@ -380,260 +227,41 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
   app.all('/rpc/*', rpcUpgrade, handleRpc);
   app.all('/rpc', rpcUpgrade, handleRpc);
 
-  app.post('/api/lists', sameOriginMiddleware(publicOrigin), async (c) => {
-    if (!/^application\/json/i.test(c.req.header('content-type') || '')) {
-      return json(c, 415, { error: 'expected application/json' });
-    }
-    let body: Record<string, unknown>;
-    try {
-      body = await readJsonBody(c);
-    } catch (error) {
-      return json(c, error instanceof Error && error.message === 'body too large' ? 413 : 400,
-        { error: error instanceof Error && error.message === 'body too large' ? 'body too large' : 'invalid json' });
-    }
-    const list = store.createList(body.name);
-    return json(c, 201, {
-      list: { id: list.id, name: list.name, createdAt: list.createdAt, revision: list.revision },
-      ownerToken: list.ownerToken,
-    });
+  // OpenAPI transport. The generated document and the Scalar reference are
+  // read-only and served from the same /api origin as the procedures.
+  app.get('/api/openapi.json', async (c) => {
+    c.header('Cache-Control', 'public, max-age=300');
+    return c.json(await openApiDocument(), 200);
   });
 
-  app.get('/api/lists/:id', (c) => {
-    const id = c.req.param('id');
-    if (!LIST_ID.test(id)) return json(c, 404, { error: 'list not found' });
-    const list = store.getList(id);
-    if (!list) return json(c, 404, { error: 'list not found' });
-    return json(c, 200, {
-      list: { id: list.id, name: list.name, createdAt: list.createdAt, revision: list.revision },
-      items: list.items.map(publicItem),
-      members: publicMembers(list),
-      memberCount: store.memberCount(list),
-    });
+  app.get('/api/docs', (c, next) => {
+    const nonce = randomBytes(16).toString('base64');
+    c.header('Content-Security-Policy', docsContentSecurityPolicy(nonce));
+    return Scalar({
+      url: `${OPENAPI_SERVER_URL}/openapi.json`,
+      pageTitle: `${OPENAPI_TITLE} reference`,
+      nonce,
+    })(c, next);
   });
 
-  app.get('/api/push/config', (c) => json(c, 200, { publicKey: pushPublicKey || null }));
-
-  app.get('/api/lists/:id/notifications', (c) => {
-    const id = c.req.param('id') || '';
-    if (!LIST_ID.test(id) || !store.getList(id)) return json(c, 404, { error: 'list not found' });
-    const clientId = requestClientId(c.req.query('client'));
-    if (!clientId) return json(c, 400, { error: 'client id required' });
-    return json(c, 200, { ...store.getNotificationStatus(id, clientId), available: Boolean(pushSender && pushPublicKey) });
-  });
-
-  app.put('/api/lists/:id/notifications', sameOriginMiddleware(publicOrigin), async (c) => {
-    const id = c.req.param('id') || '';
-    if (!LIST_ID.test(id) || !store.getList(id)) return json(c, 404, { error: 'list not found' });
-    if (!/^application\/json/i.test(c.req.header('content-type') || '')) return json(c, 415, { error: 'expected application/json' });
-    let body: Record<string, unknown>;
-    try { body = await readJsonBody(c); } catch { return json(c, 400, { error: 'invalid json' }); }
-    const clientId = requestClientId(body.clientId);
-    const subscription = requestSubscription(body.subscription);
-    if (!clientId || !subscription) return json(c, 400, { error: 'invalid notification subscription' });
-    if (!store.registerPushDestination(id, clientId, subscription)) return json(c, 409, { error: 'participant is not active' });
-    return json(c, 200, { ...store.getNotificationStatus(id, clientId), available: Boolean(pushSender && pushPublicKey) });
-  });
-
-  app.patch('/api/lists/:id/notifications', sameOriginMiddleware(publicOrigin), async (c) => {
-    const id = c.req.param('id') || '';
-    if (!LIST_ID.test(id) || !store.getList(id)) return json(c, 404, { error: 'list not found' });
-    if (!/^application\/json/i.test(c.req.header('content-type') || '')) return json(c, 415, { error: 'expected application/json' });
-    let body: Record<string, unknown>;
-    try { body = await readJsonBody(c); } catch { return json(c, 400, { error: 'invalid json' }); }
-    const clientId = requestClientId(body.clientId);
-    if (!clientId || typeof body.muted !== 'boolean') return json(c, 400, { error: 'invalid notification preference' });
-    if (!store.setNotificationsMuted(id, clientId, body.muted)) return json(c, 404, { error: 'notifications are not enabled' });
-    return json(c, 200, { ...store.getNotificationStatus(id, clientId), available: Boolean(pushSender && pushPublicKey) });
-  });
-
-  app.delete('/api/lists/:id/notifications', sameOriginMiddleware(publicOrigin), (c) => {
-    const id = c.req.param('id') || '';
-    if (!LIST_ID.test(id) || !store.getList(id)) return json(c, 404, { error: 'list not found' });
-    const clientId = requestClientId(c.req.query('client'));
-    if (!clientId) return json(c, 400, { error: 'client id required' });
-    store.disableNotifications(id, clientId);
-    return json(c, 200, { ...store.getNotificationStatus(id, clientId), available: Boolean(pushSender && pushPublicKey) });
-  });
-
-  app.post('/api/lists/:id/leave', sameOriginMiddleware(publicOrigin), async (c) => {
-    const id = c.req.param('id') || '';
-    if (!LIST_ID.test(id) || !store.getList(id)) return json(c, 404, { error: 'list not found' });
-    if (!/^application\/json/i.test(c.req.header('content-type') || '')) return json(c, 415, { error: 'expected application/json' });
-    let body: Record<string, unknown>;
-    try { body = await readJsonBody(c); } catch { return json(c, 400, { error: 'invalid json' }); }
-    const clientId = requestClientId(body.clientId);
-    if (!clientId) return json(c, 400, { error: 'client id required' });
-    return json(c, 200, { left: store.leaveMember(id, clientId) });
-  });
-
-  app.get('/api/qr', async (c) => {
-    const data = c.req.query('data') || '';
-    if (!data || data.length > 512) return json(c, 400, { error: 'bad data' });
-    try {
-      const svg = await QRCode.toString(data, {
-        type: 'svg',
-        errorCorrectionLevel: 'M',
-        margin: 4,
-        width: 256,
-      });
-      c.header('Content-Type', 'image/svg+xml; charset=utf-8');
-      c.header('Cache-Control', 'public, max-age=86400');
-      return c.body(svg, 200);
-    } catch {
-      return json(c, 400, { error: 'could not encode data' });
-    }
-  });
+  const handleOpenApi = async (c: Context): Promise<Response> => {
+    const result = await openApiHandler.handle(c.req.raw, { prefix: OPENAPI_SERVER_URL, context: {} });
+    // Unsupported paths fail explicitly instead of falling through to the
+    // frontend shell or an old compatibility handler.
+    return result.matched ? result.response : json(c, 404, { error: 'procedure not found' });
+  };
+  app.all('/api', sameOriginMiddleware(publicOrigin), handleOpenApi);
+  app.all('/api/*', sameOriginMiddleware(publicOrigin), handleOpenApi);
 
   app.get('/favicon.ico', (c) => c.redirect('/icons/favicon.svg', 302));
 
-  app.get('/ws', sameOriginMiddleware(publicOrigin), upgradeWebSocket((c) => {
-    let connection: {
-      listId: string;
-      clientId: string;
-      name: string;
-      info: ClientInfo;
-      socket: Socket;
-    } | null = null;
-
-    return {
-      onOpen(_event, socket) {
-        const listId = c.req.query('list') || '';
-        const clientId = cleanText(c.req.query('client'), 64);
-        const name = cleanText(c.req.query('name'), 40) || 'Guest';
-        const list = store.getList(listId);
-        if (!clientId || !list) {
-          socket.close(4004, !clientId ? 'missing-client-id' : 'list-not-found');
-          return;
-        }
-
-        const info: ClientInfo = { clientId, name, color: colorFor(clientId) };
-        let room = rooms.get(list.id);
-        if (!room) {
-          room = new Map();
-          rooms.set(list.id, room);
-        }
-        room.set(socket, info);
-        connection = { listId: list.id, clientId, name, info, socket };
-        const membership = store.touchMember(list, clientId, name, info.color);
-
-        socket.send(JSON.stringify({
-          t: 'init',
-          you: { clientId, color: info.color },
-          list: listPayload(list),
-          online: onlineIn(rooms, list.id),
-        }));
-        pushPresence(rooms, list.id, publicMembers(list));
-        if (membership.joined) {
-          const event: NotificationEvent = {
-            listId: list.id,
-            listName: list.name,
-            actorClientId: clientId,
-            actorName: name,
-            kind: 'join',
-          };
-          void dispatcher.dispatch(event);
-        }
-      },
-
-      onMessage(event, socket) {
-        if (!connection || connection.socket !== socket) return;
-        let message: unknown;
-        try {
-          message = JSON.parse(messageText(event.data));
-        } catch {
-          return; // Ignore garbage without taking down the connection.
-        }
-        if (!isRecord(message) || typeof message.t !== 'string') return;
-
-        const current = store.getList(connection.listId);
-        if (!current) {
-          socket.close(4004, 'list-not-found');
-          return;
-        }
-
-        if (message.t === 'ping') {
-          socket.send(JSON.stringify({ t: 'pong' }));
-          return;
-        }
-
-        const operation = operationFromMessage(message, connection.clientId, connection.name);
-        if (operation) {
-          const result = store.applyOperation(connection.listId, operation);
-          socket.send(JSON.stringify(result.ack));
-          if (result.duplicate) return;
-          if (result.notification) void dispatcher.dispatch(result.notification, result.notificationRecipients);
-          if (result.terminal) {
-            closeDeletedRoom(rooms, connection.listId);
-          } else if (result.ack.status === 'accepted' && result.list) {
-            pushState(rooms, result.list, connection.info);
-          }
-          return;
-        }
-
-        if (message.t === 'operation' && (typeof message.opId === 'string' || typeof message.operationId === 'string')) {
-          const opId = typeof message.opId === 'string' ? message.opId : String(message.operationId);
-          const result = store.applyOperation(connection.listId, {
-            operationId: opId,
-            kind: (typeof message.kind === 'string' ? message.kind : '') as OperationKind,
-            payload: isRecord(message.payload) ? message.payload : {},
-            actorClientId: connection.clientId,
-            actorName: connection.name,
-          });
-          socket.send(JSON.stringify(result.ack));
-          if (result.notification) void dispatcher.dispatch(result.notification, result.notificationRecipients);
-          return;
-        }
-
-        // Old clients did not send operation IDs. Keep accepting those
-        // messages during the protocol migration, but route their mutations
-        // through the same revision-bearing operation path.
-        const legacyKind = typeof message.t === 'string' && OPERATION_KINDS.includes(message.t as OperationKind)
-          ? message.t as OperationKind : undefined;
-        if (!legacyKind) return; // Unknown messages remain forward-compatible.
-        if (legacyKind === 'list:delete' && message.ownerToken !== current.ownerToken) {
-          socket.send(JSON.stringify({ t: 'error', message: 'Only the list owner can delete it.' }));
-          return;
-        }
-        const legacy = operationFromMessage({ ...message, opId: `legacy-${rid(9)}` }, connection.clientId, connection.name);
-        if (!legacy) return;
-        const result = store.applyOperation(connection.listId, legacy);
-        if (result.notification) void dispatcher.dispatch(result.notification, result.notificationRecipients);
-        if (result.terminal) {
-          closeDeletedRoom(rooms, connection.listId);
-        } else if (result.ack.status === 'accepted' && result.list) {
-          pushState(rooms, result.list, connection.info);
-        }
-      },
-
-      onClose() {
-        if (!connection) return;
-        const room = rooms.get(connection.listId);
-        if (!room) return;
-        room.delete(connection.socket);
-        if (room.size === 0) rooms.delete(connection.listId);
-        else {
-          const list = store.getList(connection.listId);
-          pushPresence(rooms, connection.listId, list ? publicMembers(list) : []);
-        }
-        connection = null;
-      },
-
-      onError() {
-        // The adapter will close the connection; onClose removes it from the room.
-      },
-    };
-  }));
-
-  // API routes above take precedence. Do not let an unsupported API method
-  // fall through to the frontend shell (or look like a static-file miss).
-  app.all('/api/*', (c) => json(c, 405, { error: 'method not allowed' }));
   // The Node static middleware safely confines requests to publicDir and
   // returns 404 for missing files.
   app.get('*', serveStatic({ root: publicDir }));
   app.on(['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], '*', (c) => json(c, 405, { error: 'method not allowed' }));
   app.notFound((c) => json(c, 404, { error: 'not found' }));
 
-  return { app, store, rooms, rpcPublisher, rpcSessions, buildId, dispatcher };
+  return { app, store, rpcPublisher, rpcSessions, buildId, dispatcher };
 }
 
 /** Create the Hono application without opening a listening socket. */
@@ -664,18 +292,11 @@ export function startServer(options: StartOptions = {}): RunningServer {
     stopped = true;
     resources.dispatcher.dispose();
     resources.store.flushSync();
-    for (const room of resources.rooms.values()) {
-      for (const socket of room.keys()) {
-        try {
-          socket.close(1001, 'server shutting down');
-        } catch {
-          // noop
-        }
-      }
-    }
-    resources.rooms.clear();
     resources.rpcPublisher.closeAll();
     resources.rpcSessions.closeAll();
+    for (const client of websocketServer.clients) {
+      try { client.close(1001, 'server shutting down'); } catch { /* noop */ }
+    }
     resources.store.close();
     websocketServer.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));

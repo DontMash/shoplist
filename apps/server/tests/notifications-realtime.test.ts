@@ -3,6 +3,10 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
+import { createORPCClient } from '@orpc/client';
+import { RPCLink } from '@orpc/client/websocket';
+import type { ContractRouterClient } from '@orpc/contract';
+import type { TransportContract } from '@shoplist/transport-contract';
 import { startServer, type RunningServer } from '../src/server.js';
 import type { NotificationPayload, PushSender } from '../src/notifications.js';
 import type { PushSubscription } from '../src/store.js';
@@ -12,7 +16,9 @@ const subscription: PushSubscription = {
   keys: { p256dh: 'public-key', auth: 'auth-key' },
 };
 
-describe('realtime push notifications', () => {
+type RpcClient = ContractRouterClient<TransportContract>;
+
+describe('realtime push notifications over the native transport', () => {
   let directory: string;
   let running: RunningServer;
   let wsBase: string;
@@ -51,15 +57,15 @@ describe('realtime push notifications', () => {
     running.store.touchMember(list, 'alice', 'Alice', '#123456');
     running.store.registerPushDestination(list.id, 'alice', subscription);
 
-    const bob = await connect(`${wsBase}/ws?list=${list.id}&client=bob&name=Bob`);
-    await waitFor(bob.messages, (message) => message.t === 'init');
+    const bob = await connect(wsBase);
+    await bob.client.listSession.open({ listId: list.id, clientId: 'bob', name: 'Bob', protocolVersion: 1 });
     await waitForCall(send, (call) => call[0]?.clientId === 'alice');
 
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ clientId: 'alice' }), expect.objectContaining({
       body: 'Bob joined Groceries',
       url: `/#/list/${list.id}`,
     }));
-    await close(bob.socket);
+    await bob.close();
   });
 
   it('does not push a join notification to participants with an active list session', async () => {
@@ -67,15 +73,16 @@ describe('realtime push notifications', () => {
     const list = running.store.createList('Active list');
     running.store.touchMember(list, 'alice', 'Alice', '#123456');
     running.store.registerPushDestination(list.id, 'alice', subscription);
-    const alice = await connect(`${wsBase}/ws?list=${list.id}&client=alice&name=Alice`);
-    await waitFor(alice.messages, (message) => message.t === 'init');
 
-    const bob = await connect(`${wsBase}/ws?list=${list.id}&client=bob&name=Bob`);
-    await waitFor(bob.messages, (message) => message.t === 'init');
+    const alice = await connect(wsBase);
+    await alice.client.listSession.open({ listId: list.id, clientId: 'alice', name: 'Alice', protocolVersion: 1 });
+    const bob = await connect(wsBase);
+    await bob.client.listSession.open({ listId: list.id, clientId: 'bob', name: 'Bob', protocolVersion: 1 });
+
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(send).not.toHaveBeenCalled();
-    await close(alice.socket);
-    await close(bob.socket);
+    await alice.close();
+    await bob.close();
   });
 
   it('sends a final deletion notification before closing the list room', async () => {
@@ -84,16 +91,23 @@ describe('realtime push notifications', () => {
     running.store.touchMember(list, 'alice', 'Alice', '#654321');
     running.store.touchMember(list, 'bob', 'Bob', '#123456');
     running.store.registerPushDestination(list.id, 'bob', { ...subscription, endpoint: 'https://push.example/delete' });
-    const alice = await connect(`${wsBase}/ws?list=${list.id}&client=alice&name=Alice`);
-    await waitFor(alice.messages, (message) => message.t === 'init');
 
-    alice.socket.send(JSON.stringify({ t: 'list:delete', opId: 'delete-list', ownerToken: list.ownerToken }));
-    await waitFor(alice.messages, (message) => message.t === 'ack' && message.opId === 'delete-list');
+    const alice = await connect(wsBase);
+    const opened = await alice.client.listSession.open({ listId: list.id, clientId: 'alice', name: 'Alice', protocolVersion: 1 });
+    const ack = await alice.client.list.delete({
+      listId: list.id,
+      sessionId: opened.sessionId,
+      clientId: 'alice',
+      operationId: 'delete-list',
+      ownerToken: list.ownerToken,
+    });
+    expect(ack).toMatchObject({ status: 'accepted' });
+
     await waitForCall(send, (call) => call[0]?.clientId === 'bob');
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ clientId: 'bob' }), expect.objectContaining({
       body: 'Alice deleted Deleted list',
     }));
-    await close(alice.socket);
+    await alice.close();
   });
 
   it('routes accepted mutations to the injected push sender', async () => {
@@ -102,50 +116,57 @@ describe('realtime push notifications', () => {
     running.store.touchMember(list, 'alice', 'Alice', '#654321');
     running.store.touchMember(list, 'bob', 'Bob', '#123456');
     running.store.registerPushDestination(list.id, 'bob', { ...subscription, endpoint: 'https://push.example/bob' });
-    const alice = await connect(`${wsBase}/ws?list=${list.id}&client=alice&name=Alice`);
-    await waitFor(alice.messages, (message) => message.t === 'init');
 
-    alice.socket.send(JSON.stringify({ t: 'item:add', opId: 'add-item', item: { name: 'Milk' } }));
-    await waitFor(alice.messages, (message) => message.t === 'ack' && message.opId === 'add-item');
+    const alice = await connect(wsBase);
+    const opened = await alice.client.listSession.open({ listId: list.id, clientId: 'alice', name: 'Alice', protocolVersion: 1 });
+    const ack = await alice.client.item.add({
+      listId: list.id,
+      sessionId: opened.sessionId,
+      clientId: 'alice',
+      operationId: 'add-item',
+      name: 'Milk',
+    });
+    expect(ack).toMatchObject({ status: 'accepted' });
+
     await waitForCall(send, (call) => call[0]?.clientId === 'bob');
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ clientId: 'bob' }), expect.objectContaining({
       body: 'Alice updated Mutation list',
     }));
-    await close(alice.socket);
+    await alice.close();
   });
 
-  it('closes active sockets during server shutdown', async () => {
+  it('closes active websocket sessions during server shutdown', async () => {
     const list = running.store.createList('Shutdown list');
-    const alice = await connect(`${wsBase}/ws?list=${list.id}&client=shutdown&name=Alice`);
-    await waitFor(alice.messages, (message) => message.t === 'init');
+    const alice = await connect(wsBase);
+    await alice.client.listSession.open({ listId: list.id, clientId: 'shutdown', name: 'Alice', protocolVersion: 1 });
+    const closed = new Promise<void>((resolve) => alice.socket.once('close', () => resolve()));
     await running.close();
-    await close(alice.socket);
+    await closed;
   });
 });
 
-type Message = Record<string, any>;
-type Client = { socket: WebSocket; messages: Message[] };
-
-function connect(url: string): Promise<Client> {
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url);
-    const messages: Message[] = [];
-    socket.on('message', (data) => {
-      try { messages.push(JSON.parse(data.toString()) as Message); } catch { /* ignore */ }
-    });
-    socket.once('error', reject);
-    socket.once('open', () => resolve({ socket, messages }));
-  });
+interface ConnectedClient {
+  socket: WebSocket;
+  client: RpcClient;
+  close: () => Promise<void>;
 }
 
-async function waitFor(messages: Message[], predicate: (message: Message) => boolean): Promise<Message> {
-  const start = Date.now();
-  while (Date.now() - start < 3000) {
-    const index = messages.findIndex(predicate);
-    if (index !== -1) return messages.splice(0, index + 1).pop() as Message;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`Timed out waiting for message: ${messages.map((message) => message.t).join(', ')}`);
+async function connect(base: string): Promise<ConnectedClient> {
+  const socket = new WebSocket(`${base}/rpc`);
+  await new Promise<void>((resolve, reject) => {
+    socket.once('error', reject);
+    socket.once('open', () => resolve());
+  });
+  const client = createORPCClient<RpcClient>(new RPCLink({ websocket: socket as unknown as WebSocket }));
+  return {
+    socket,
+    client,
+    close: () => new Promise<void>((resolve) => {
+      if (socket.readyState === WebSocket.CLOSED) return resolve();
+      socket.once('close', () => resolve());
+      socket.close();
+    }),
+  };
 }
 
 async function waitForCall(mock: ReturnType<typeof vi.fn>, predicate: (call: any[]) => boolean): Promise<void> {
@@ -155,12 +176,4 @@ async function waitForCall(mock: ReturnType<typeof vi.fn>, predicate: (call: any
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('Timed out waiting for push delivery');
-}
-
-function close(socket: WebSocket): Promise<void> {
-  return new Promise((resolve) => {
-    if (socket.readyState === WebSocket.CLOSED) return resolve();
-    socket.once('close', () => resolve());
-    socket.close();
-  });
 }

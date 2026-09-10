@@ -42,6 +42,14 @@ function TestRouter({ children }: { children: ReactNode }) {
   return <Router hook={() => [location, setLocation]}>{children}</Router>;
 }
 
+/** Minimal oRPC fetch response for the native transport. */
+function rpcResponse(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify({ json: value }), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
 function renderList() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -55,7 +63,7 @@ describe('list page boundary', () => {
   beforeEach(() => {
     useParticipantStore.setState({ identity: { clientId: 'client-test', name: 'Alex' } });
     useSavedListsStore.setState({ lists: [{ id: 'list-1', name: 'Groceries', ownerToken: null, joinedAt: 1 }] });
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => snapshot }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rpcResponse(snapshot)));
     Object.defineProperty(window, 'WebSocket', { configurable: true, value: MockWebSocket });
   });
 
@@ -73,8 +81,8 @@ describe('list page boundary', () => {
 
     const breadRow = screen.getByDisplayValue('Bread').closest('li');
     if (!breadRow) throw new Error('Bread row is missing');
-    fireEvent.click(within(breadRow).getByRole('button', { name: 'Collected' }));
-    await waitFor(() => expect(within(breadRow).getByRole('button', { name: 'Collected' })).toHaveAttribute('aria-pressed', 'true'));
+    fireEvent.click(within(breadRow).getByRole('button', { name: 'Collect', pressed: false }));
+    await waitFor(() => expect(within(breadRow).getByRole('button', { name: 'Collected', pressed: true })).toHaveAttribute('aria-pressed', 'true'));
   });
 
   it('renders the item editor as a name-only badge', async () => {
@@ -96,20 +104,27 @@ describe('list page boundary', () => {
     await waitFor(() => expect(screen.queryByDisplayValue('Milk')).not.toBeInTheDocument());
   });
 
-  it('mutes notifications from the list menu', async () => {
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).includes('/notifications')) {
-        return Promise.resolve({ ok: true, json: async () => init?.method === 'PATCH'
-          ? { enabled: true, muted: true, available: true }
-          : { enabled: true, muted: false, available: true } });
+  it('mutes notifications from the list menu through the native transport', async () => {
+    const fetchMock = vi.fn(async (request: Request) => {
+      if (request.url.includes('/rpc/push/')) {
+        const body = JSON.parse(await request.text()) as { json: { muted?: boolean } };
+        return rpcResponse({
+          enabled: true,
+          muted: body.json.muted ?? false,
+          available: true,
+        });
       }
-      return Promise.resolve({ ok: true, json: async () => snapshot });
+      return rpcResponse(snapshot);
     });
     vi.stubGlobal('fetch', fetchMock);
     renderList();
     expect(await screen.findByDisplayValue('Milk')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'List options' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Mute notifications' }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/lists/list-1/notifications', expect.objectContaining({ method: 'PATCH' })));
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls as Array<[Request, RequestInit?]>;
+      expect(calls.some((call) => call[0].url.includes('/rpc/push/mute'))).toBe(true);
+      expect(calls.every((call) => !call[0].url.includes('/api/'))).toBe(true);
+    });
   });
 });
