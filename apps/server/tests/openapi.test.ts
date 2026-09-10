@@ -25,12 +25,46 @@ interface JsonResult<T> {
   body: T;
 }
 
+type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+
+const procedureMethods: Record<string, HttpMethod> = {
+  '/list/get': 'GET',
+  '/list/create': 'POST',
+  '/list/leave': 'DELETE',
+  '/list/clear': 'DELETE',
+  '/list/rename': 'PATCH',
+  '/list/delete': 'DELETE',
+  '/push/config': 'GET',
+  '/push/status': 'GET',
+  '/push/register': 'POST',
+  '/push/mute': 'PATCH',
+  '/push/remove': 'DELETE',
+  '/qr/generate': 'GET',
+  '/listSession/open': 'POST',
+  '/listSession/events': 'GET',
+  '/item/add': 'POST',
+  '/item/update': 'PATCH',
+  '/item/delete': 'DELETE',
+};
+
+function queryUrl(pathName: string, input: unknown): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (value !== undefined) query.set(key, String(value));
+  }
+  const encoded = query.toString();
+  return `http://shoplist.test/api${pathName}${encoded ? `?${encoded}` : ''}`;
+}
+
 async function procedure<T>(resources: ShoplistApp, pathName: string, input: unknown): Promise<JsonResult<T>> {
-  const response = await resources.app.request(`http://shoplist.test/api${pathName}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(input),
-  });
+  const method = procedureMethods[pathName];
+  if (!method) throw new Error(`No HTTP method configured for ${pathName}`);
+  const response = await resources.app.request(
+    method === 'GET' ? queryUrl(pathName, input) : `http://shoplist.test/api${pathName}`,
+    method === 'GET'
+      ? { method }
+      : { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) },
+  );
   return { status: response.status, body: await response.json() as T };
 }
 
@@ -154,10 +188,9 @@ class SseStream {
 }
 
 async function eventStream(resources: ShoplistApp, input: Record<string, unknown>): Promise<SseStream> {
-  const response = await resources.app.request('http://shoplist.test/api/listSession/events', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
-    body: JSON.stringify(input),
+  const response = await resources.app.request(queryUrl('/listSession/events', input), {
+    method: 'GET',
+    headers: { accept: 'text/event-stream' },
   });
   expect(response.status).toBe(200);
   expect(response.headers.get('content-type')).toContain('text/event-stream');
@@ -462,6 +495,7 @@ describe('OpenAPI transport at /api', () => {
       servers: Array<{ url: string }>;
       paths: Record<string, Record<string, {
         operationId?: string;
+        parameters?: Array<{ in: string; name: string; schema?: Record<string, unknown> }>;
         requestBody?: { content: Record<string, { schema: Record<string, unknown> }> };
         responses: Record<string, { content?: Record<string, { schema: Record<string, unknown> }> }>;
       }>>;
@@ -471,13 +505,15 @@ describe('OpenAPI transport at /api', () => {
     expect(document.info.title).toBeTruthy();
     expect(document.info.version).toBeTruthy();
     expect(document.servers).toEqual([expect.objectContaining({ url: '/api' })]);
-    expect(document.paths['/list/get'].post.operationId).toBe('list.get');
-    expect(document.paths['/item/add'].post.operationId).toBe('item.add');
-    expect(document.paths['/list/delete'].post.operationId).toBe('list.delete');
+    for (const [pathName, method] of Object.entries(procedureMethods)) {
+      const operation = document.paths[pathName][method.toLowerCase()];
+      expect(operation?.operationId, `${method} ${pathName}`).toBe(pathName.slice(1).replace('/', '.'));
+    }
 
-    const getOperation = document.paths['/list/get'].post;
-    const inputSchema = getOperation.requestBody?.content['application/json']?.schema;
-    expect(JSON.stringify(inputSchema)).toContain('"id"');
+    const getOperation = document.paths['/list/get'].get;
+    expect(getOperation.parameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ in: 'query', name: 'id' }),
+    ]));
     const successSchema = getOperation.responses['200'].content?.['application/json']?.schema;
     expect(JSON.stringify(successSchema)).toContain('memberCount');
     expect(getOperation.responses['404']).toBeTruthy();
@@ -489,7 +525,7 @@ describe('OpenAPI transport at /api', () => {
     expect(notFoundSchema).toContain('NOT_FOUND');
     expect(notFoundSchema).toContain('retryable');
 
-    const events = document.paths['/listSession/events'].post;
+    const events = document.paths['/listSession/events'].get;
     expect(events.responses['200'].content?.['text/event-stream']).toBeTruthy();
     expect(JSON.stringify(events.responses)).toContain('eventCursor');
 
@@ -526,7 +562,7 @@ describe('OpenAPI transport at /api', () => {
       ['POST', '/api/lists'],
       ['GET', '/api/lists/some-list'],
       ['GET', '/api/qr?data=invite'],
-      ['GET', '/api/push/config'],
+      ['GET', '/api/push/old-config'],
       ['GET', '/api/lists/some-list/notifications?client=a'],
       ['PUT', '/api/lists/some-list/notifications'],
       ['PATCH', '/api/lists/some-list/notifications'],

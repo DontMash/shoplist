@@ -68,12 +68,26 @@ describe('notification destinations', () => {
     const list = resources.store.createList('Groceries');
     resources.store.touchMember(list, 'alice', 'Alice', '#123456');
 
-    const call = async (pathname: string, body: unknown) => {
-      const response = await resources.app.request(`http://shoplist.test/api${pathname}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+    const methods: Record<string, 'GET' | 'POST' | 'PATCH' | 'DELETE'> = {
+      '/push/config': 'GET',
+      '/push/status': 'GET',
+      '/push/register': 'POST',
+      '/push/mute': 'PATCH',
+      '/push/remove': 'DELETE',
+      '/list/leave': 'DELETE',
+    };
+    const call = async (pathname: string, body: Record<string, unknown>) => {
+      const method = methods[pathname];
+      if (!method) throw new Error(`No HTTP method configured for ${pathname}`);
+      const query = new URLSearchParams(Object.entries(body).map(([key, value]) => [key, String(value)]));
+      const response = await resources.app.request(
+        method === 'GET'
+          ? `http://shoplist.test/api${pathname}?${query}`
+          : `http://shoplist.test/api${pathname}`,
+        method === 'GET'
+          ? { method }
+          : { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
+      );
       return { status: response.status, body: await response.json() };
     };
 

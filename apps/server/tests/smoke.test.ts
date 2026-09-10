@@ -496,17 +496,13 @@ describe('Hono application and native realtime boundaries', () => {
     expect(created.list.name).toBe('Forwarded list');
     expect(created.ownerToken).toHaveLength(16);
 
-    const fetched = await fetch(`${base}/api/list/get`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: created.list.id }),
+    const fetched = await fetch(`${base}/api/list/get?id=${encodeURIComponent(created.list.id)}`, {
+      method: 'GET',
     });
     expect(fetched.status).toBe(200);
     expect(await fetched.json()).toMatchObject({ list: { id: created.list.id }, items: [], members: [], memberCount: 0 });
-    expect((await fetch(`${base}/api/list/get`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'missing-list' }),
+    expect((await fetch(`${base}/api/list/get?id=missing-list`, {
+      method: 'GET',
     })).status).toBe(404);
     expect((await fetch(`${base}/api/unknown`, { method: 'POST' })).status).toBe(404);
 

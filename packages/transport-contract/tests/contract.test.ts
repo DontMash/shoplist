@@ -14,24 +14,24 @@ type AnyContractProcedure = {
   };
 };
 
-const procedurePaths: ReadonlyArray<readonly [string, string]> = [
-  ['list', 'get'],
-  ['list', 'create'],
-  ['list', 'leave'],
-  ['list', 'clear'],
-  ['list', 'rename'],
-  ['list', 'delete'],
-  ['push', 'config'],
-  ['push', 'status'],
-  ['push', 'register'],
-  ['push', 'mute'],
-  ['push', 'remove'],
-  ['qr', 'generate'],
-  ['listSession', 'open'],
-  ['listSession', 'events'],
-  ['item', 'add'],
-  ['item', 'update'],
-  ['item', 'delete'],
+const procedureRoutes: ReadonlyArray<readonly [string, string, string]> = [
+  ['list', 'get', 'GET'],
+  ['list', 'create', 'POST'],
+  ['list', 'leave', 'DELETE'],
+  ['list', 'clear', 'DELETE'],
+  ['list', 'rename', 'PATCH'],
+  ['list', 'delete', 'DELETE'],
+  ['push', 'config', 'GET'],
+  ['push', 'status', 'GET'],
+  ['push', 'register', 'POST'],
+  ['push', 'mute', 'PATCH'],
+  ['push', 'remove', 'DELETE'],
+  ['qr', 'generate', 'GET'],
+  ['listSession', 'open', 'POST'],
+  ['listSession', 'events', 'GET'],
+  ['item', 'add', 'POST'],
+  ['item', 'update', 'PATCH'],
+  ['item', 'delete', 'DELETE'],
 ];
 
 function procedureAt(path: readonly [string, string]): AnyContractProcedure {
@@ -43,10 +43,11 @@ function procedureAt(path: readonly [string, string]): AnyContractProcedure {
 }
 
 describe('shared transport contract', () => {
-  it('declares every procedure as an explicit POST operation with a stable identity', () => {
-    for (const path of procedurePaths) {
+  it('declares every procedure with its conventional HTTP method and stable identity', () => {
+    for (const [group, procedure, method] of procedureRoutes) {
+      const path = [group, procedure] as const;
       const route = procedureAt(path)['~orpc'].route;
-      expect(route.method, path.join('.')).toBe('POST');
+      expect(route.method, path.join('.')).toBe(method);
       expect(route.operationId, path.join('.')).toBe(path.join('.'));
       expect(route.path, path.join('.')).toBe(`/${path.join('/')}`);
     }

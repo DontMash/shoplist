@@ -138,18 +138,20 @@ const operationErrors = {
   UPGRADE_REQUIRED: { status: 426, data: structuredFailureSchema },
 } as const;
 
-/** Build a POST procedure route together with the OpenAPI metadata it exposes. */
+/** Build a procedure route together with the OpenAPI metadata it exposes. */
 function procedureRoute(config: {
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   path: `/${string}`;
   operationId: string;
   summary: string;
   description?: string;
   successStatus?: number;
 }) {
-  return oc.route({ method: 'POST', ...config });
+  return oc.route(config);
 }
 
 const listGet = procedureRoute({
+  method: 'GET',
   path: '/list/get',
   operationId: 'list.get',
   summary: 'Read a list',
@@ -160,6 +162,7 @@ const listGet = procedureRoute({
   .errors(operationErrors);
 
 const listCreate = procedureRoute({
+  method: 'POST',
   path: '/list/create',
   operationId: 'list.create',
   summary: 'Create a list',
@@ -171,6 +174,7 @@ const listCreate = procedureRoute({
   .errors(operationErrors);
 
 const listLeave = procedureRoute({
+  method: 'DELETE',
   path: '/list/leave',
   operationId: 'list.leave',
   summary: 'Leave a list',
@@ -181,6 +185,7 @@ const listLeave = procedureRoute({
   .errors(operationErrors);
 
 const pushConfig = procedureRoute({
+  method: 'GET',
   path: '/push/config',
   operationId: 'push.config',
   summary: 'Read push configuration',
@@ -191,6 +196,7 @@ const pushConfig = procedureRoute({
   .errors(operationErrors);
 
 const pushStatus = procedureRoute({
+  method: 'GET',
   path: '/push/status',
   operationId: 'push.status',
   summary: 'Read push status',
@@ -201,6 +207,7 @@ const pushStatus = procedureRoute({
   .errors(operationErrors);
 
 const pushRegister = procedureRoute({
+  method: 'POST',
   path: '/push/register',
   operationId: 'push.register',
   summary: 'Register a push destination',
@@ -221,6 +228,7 @@ const pushRegister = procedureRoute({
   .errors(operationErrors);
 
 const pushMute = procedureRoute({
+  method: 'PATCH',
   path: '/push/mute',
   operationId: 'push.mute',
   summary: 'Mute push notifications',
@@ -231,6 +239,7 @@ const pushMute = procedureRoute({
   .errors(operationErrors);
 
 const pushRemove = procedureRoute({
+  method: 'DELETE',
   path: '/push/remove',
   operationId: 'push.remove',
   summary: 'Remove a push destination',
@@ -241,6 +250,7 @@ const pushRemove = procedureRoute({
   .errors(operationErrors);
 
 const qrGenerate = procedureRoute({
+  method: 'GET',
   path: '/qr/generate',
   operationId: 'qr.generate',
   summary: 'Generate a QR code',
@@ -251,6 +261,7 @@ const qrGenerate = procedureRoute({
   .errors(operationErrors);
 
 const listSessionOpen = procedureRoute({
+  method: 'POST',
   path: '/listSession/open',
   operationId: 'listSession.open',
   summary: 'Open a list session',
@@ -266,6 +277,7 @@ const listSessionOpen = procedureRoute({
   .errors(operationErrors);
 
 const listSessionEvents = procedureRoute({
+  method: 'GET',
   path: '/listSession/events',
   operationId: 'listSession.events',
   summary: 'Stream list-session events',
@@ -285,6 +297,7 @@ const listSessionEvents = procedureRoute({
   .errors(operationErrors);
 
 const itemAdd = procedureRoute({
+  method: 'POST',
   path: '/item/add',
   operationId: 'item.add',
   summary: 'Add an item',
@@ -295,6 +308,7 @@ const itemAdd = procedureRoute({
   .errors(operationErrors);
 
 const itemUpdate = procedureRoute({
+  method: 'PATCH',
   path: '/item/update',
   operationId: 'item.update',
   summary: 'Update an item',
@@ -305,6 +319,7 @@ const itemUpdate = procedureRoute({
   .errors(operationErrors);
 
 const itemDelete = procedureRoute({
+  method: 'DELETE',
   path: '/item/delete',
   operationId: 'item.delete',
   summary: 'Delete an item',
@@ -315,6 +330,7 @@ const itemDelete = procedureRoute({
   .errors(operationErrors);
 
 const listClear = procedureRoute({
+  method: 'DELETE',
   path: '/list/clear',
   operationId: 'list.clear',
   summary: 'Clear a list',
@@ -325,6 +341,7 @@ const listClear = procedureRoute({
   .errors(operationErrors);
 
 const listRename = procedureRoute({
+  method: 'PATCH',
   path: '/list/rename',
   operationId: 'list.rename',
   summary: 'Rename a list',
@@ -335,6 +352,7 @@ const listRename = procedureRoute({
   .errors(operationErrors);
 
 const listDelete = procedureRoute({
+  method: 'DELETE',
   path: '/list/delete',
   operationId: 'list.delete',
   summary: 'Delete a list',
