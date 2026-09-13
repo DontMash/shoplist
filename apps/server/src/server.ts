@@ -1,7 +1,7 @@
 import path from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Hono, type Context, type Next } from 'hono';
+import { secureHeaders, NONCE } from 'hono/secure-headers';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { serve, upgradeWebSocket, type ServerType } from '@hono/node-server';
 import { RPCHandler as FetchRPCHandler, BodyLimitPlugin } from '@orpc/server/fetch';
@@ -23,34 +23,67 @@ function safeBuildId(value: string | undefined): string {
   return value && /^[A-Za-z0-9._-]{1,128}$/.test(value) ? value : 'unknown';
 }
 
-export const CSP =
-  "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; " +
-  "connect-src 'self' ws: wss:; manifest-src 'self'; font-src 'self'; " +
-  "base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
-
-export const BASE_HEADERS = {
-  'X-Content-Type-Options': 'nosniff',
-  'Content-Security-Policy': CSP,
-  'Referrer-Policy': 'strict-origin-when-cross-origin',
-  'X-Frame-Options': 'DENY',
-} as const;
+const APPLICATION_CSP = {
+  defaultSrc: ["'none'"],
+  styleSrc: ["'self'"],
+  scriptSrc: ["'self'"],
+  imgSrc: ["'self'", 'data:'],
+  connectSrc: ["'self'", 'ws:', 'wss:'],
+  manifestSrc: ["'self'"],
+  fontSrc: ["'self'"],
+  baseUri: ["'none'"],
+  formAction: ["'self'"],
+  frameAncestors: ["'none'"],
+};
 
 /**
- * Content-Security-Policy for the Scalar documentation page only.
- *
  * Scalar loads its standalone bundle from a pinned CDN and initializes it with
  * an inline script, so the page needs a nonce and the CDN origin. Scalar also
  * renders inline `style="..."` attributes, which a nonce cannot authorize, so
- * inline styles are allowed on this route. Every other route keeps `CSP`.
+ * inline styles are allowed on this route. Every other route keeps the
+ * application CSP unchanged.
  */
-export function docsContentSecurityPolicy(nonce: string): string {
-  return "default-src 'none'; " +
-    `script-src 'nonce-${nonce}' 'self' https://cdn.jsdelivr.net; ` +
-    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
-    "img-src 'self' data: https://cdn.jsdelivr.net; font-src 'self' data: https://cdn.jsdelivr.net; " +
-    "connect-src 'self' https://cdn.jsdelivr.net; manifest-src 'self'; " +
-    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
-}
+const DOCUMENTATION_CSP = {
+  defaultSrc: ["'none'"],
+  scriptSrc: [NONCE, "'self'", 'https://cdn.jsdelivr.net'],
+  styleSrc: ["'self'", "'unsafe-inline'", 'https://cdn.jsdelivr.net'],
+  imgSrc: ["'self'", 'data:', 'https://cdn.jsdelivr.net'],
+  fontSrc: ["'self'", 'data:', 'https://cdn.jsdelivr.net'],
+  connectSrc: ["'self'", 'https://cdn.jsdelivr.net'],
+  manifestSrc: ["'self'"],
+  baseUri: ["'none'"],
+  formAction: ["'self'"],
+  frameAncestors: ["'none'"],
+};
+
+// Keep the response contract stable while delegating security-header emission
+// and nonce generation to Hono. The defaults are intentionally disabled: this
+// application has not opted into the additional headers secureHeaders() adds.
+const SECURITY_HEADER_OPTIONS = {
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: false,
+  crossOriginOpenerPolicy: false,
+  originAgentCluster: false,
+  referrerPolicy: 'strict-origin-when-cross-origin',
+  strictTransportSecurity: false,
+  xContentTypeOptions: 'nosniff',
+  xDnsPrefetchControl: false,
+  xDownloadOptions: false,
+  xFrameOptions: 'DENY',
+  xPermittedCrossDomainPolicies: false,
+  xXssProtection: false,
+  removePoweredBy: false,
+};
+
+const applicationSecurityHeaders = secureHeaders({
+  ...SECURITY_HEADER_OPTIONS,
+  contentSecurityPolicy: APPLICATION_CSP,
+});
+
+const documentationSecurityHeaders = secureHeaders({
+  ...SECURITY_HEADER_OPTIONS,
+  contentSecurityPolicy: DOCUMENTATION_CSP,
+});
 
 /** Explicit event-stream behavior for the OpenAPI fetch handler. */
 export interface EventStreamOptions {
@@ -130,11 +163,6 @@ export function sameOrigin(request: Request, publicOrigin?: string): boolean {
   }
 }
 
-function withBaseHeaders(c: Context, buildId: string): void {
-  for (const [name, value] of Object.entries(BASE_HEADERS)) c.header(name, value);
-  c.header('X-Shoplist-Build', buildId);
-}
-
 function json(c: Context, status: number, body: unknown, cache = 'no-store'): Response {
   c.header('Cache-Control', cache);
   return c.json(body, status as ContentfulStatusCode);
@@ -192,8 +220,11 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
   const app = new Hono();
 
   app.use('*', async (c, next) => {
-    withBaseHeaders(c, buildId);
-    return next();
+    c.header('X-Shoplist-Build', buildId);
+    const securityHeaders = c.req.path === '/api/docs'
+      ? documentationSecurityHeaders
+      : applicationSecurityHeaders;
+    return securityHeaders(c, next);
   });
 
   app.onError((error, c) => {
@@ -234,9 +265,9 @@ function createAppWithEnv(options: AppOptions, environment: ServerEnv): Shoplist
     return c.json(await openApiDocument(), 200);
   });
 
-  app.get('/api/docs', (c, next) => {
-    const nonce = randomBytes(16).toString('base64');
-    c.header('Content-Security-Policy', docsContentSecurityPolicy(nonce));
+  app.get('/api/docs', async (c, next) => {
+    const nonce = c.get('secureHeadersNonce');
+    if (!nonce) return json(c, 500, { error: 'internal error' });
     return Scalar({
       url: `${OPENAPI_SERVER_URL}/openapi.json`,
       pageTitle: `${OPENAPI_TITLE} reference`,

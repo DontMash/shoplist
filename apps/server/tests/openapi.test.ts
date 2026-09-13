@@ -536,7 +536,9 @@ describe('OpenAPI transport at /api', () => {
 
   it('serves interactive Scalar documentation backed by the generated document', async () => {
     const resources = await resource();
-    const response = await resources.app.request('http://shoplist.test/api/docs');
+    const response = await resources.app.request('http://shoplist.test/api/docs', {
+      headers: { origin: 'https://evil.example' },
+    });
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/html');
     const html = await response.text();

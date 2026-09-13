@@ -461,6 +461,13 @@ describe('Hono application and native realtime boundaries', () => {
     const health = await fetch(`${base}/healthz`);
     expect(health.status).toBe(200);
     expect(health.headers.get('content-security-policy')).toContain("default-src 'none'");
+    expect(health.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(health.headers.get('referrer-policy')).toBe('strict-origin-when-cross-origin');
+    expect(health.headers.get('x-frame-options')).toBe('DENY');
+    expect(health.headers.get('strict-transport-security')).toBeNull();
+    expect(health.headers.get('cross-origin-opener-policy')).toBeNull();
+    expect(health.headers.get('cross-origin-resource-policy')).toBeNull();
+    expect(health.headers.get('x-xss-protection')).toBeNull();
     expect(health.headers.get('x-shoplist-build')).toBe('test-build');
     expect(await health.json()).toMatchObject({ ok: true, lists: 0, build: 'test-build' });
 
@@ -468,6 +475,12 @@ describe('Hono application and native realtime boundaries', () => {
     expect(shell.status).toBe(200);
     expect(await shell.text()).toContain('<title>Shoplist</title>');
     expect((await fetch(`${base}/..%2f..%2fserver.js`)).status).toBeGreaterThanOrEqual(400);
+
+    // Documentation and the generated specification are public read-only
+    // routes; procedure calls retain the origin rejection below.
+    expect((await fetch(`${base}/api/openapi.json`, {
+      headers: { origin: 'https://evil.example' },
+    })).status).toBe(200);
 
     // Removed legacy routes fail explicitly instead of serving the frontend shell.
     const legacy = await fetch(`${base}/api/lists`);
@@ -480,6 +493,9 @@ describe('Hono application and native realtime boundaries', () => {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin: 'https://evil.example' },
       body: JSON.stringify({ name: 'Rejected' }),
+    })).status).toBe(403);
+    expect((await fetch(`${base}/rpc`, {
+      headers: { origin: 'https://evil.example' },
     })).status).toBe(403);
     const forwardedCreate = await fetch(`${base}/api/list/create`, {
       method: 'POST',
