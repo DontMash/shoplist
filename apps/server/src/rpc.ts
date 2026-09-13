@@ -1,6 +1,5 @@
 import { ORPCError } from '@orpc/client';
 import { AsyncIteratorClass } from '@orpc/shared';
-import { Layer } from 'effect';
 import { implement } from '@orpc/server';
 import type { NotificationDispatcher } from './notifications.js';
 import { colorFor } from './rpc-support.js';
@@ -12,12 +11,14 @@ import {
   type Participant,
   type SessionEvent,
 } from '@shoplist/transport-contract';
-import { cleanText, rid, type Store, type StoreOperation, type OperationKind, type ShoppingItem, type ShoppingList } from './store.js';
+import { cleanText, rid, type Store, type OperationKind, type ShoppingItem, type ShoppingList } from './store.js';
+import { makeProcessLayer, PersistenceError } from './effect/services.js';
 import {
-  makeProcessLayer,
-  runListMutation,
-  type PublisherServiceShape,
-} from './effect/services.js';
+  createListMutationWorkflow,
+  InactiveListSessionError,
+  type ListMutationWorkflow,
+  type MutationSession,
+} from './list-mutation.js';
 
 type WithoutCursor<T> = T extends unknown ? Omit<T, 'eventCursor'> : never;
 export type PublisherEvent = WithoutCursor<SessionEvent>;
@@ -30,16 +31,10 @@ type RpcContext = {
   readonly sessions: RpcSessionRegistry;
   readonly dispatcher: NotificationDispatcher;
   readonly publicKey: string;
-  readonly effectLayer: Layer.Layer<any, never, never>;
+  readonly mutationWorkflow: ListMutationWorkflow;
 };
 
-interface RpcSession {
-  readonly sessionId: string;
-  readonly listId: string;
-  readonly clientId: string;
-  readonly name: string;
-  readonly participant: Participant;
-}
+export type RpcSession = MutationSession;
 
 /** A small cancellable async queue used as the oRPC event-iterator source. */
 class EventQueue implements AsyncIterator<SessionEvent>, AsyncIterable<SessionEvent> {
@@ -206,6 +201,12 @@ function listOrThrow(store: Store, listId: string): ShoppingList {
   return list;
 }
 
+function assertSession(context: RpcContext, listId: string, sessionId: string): RpcSession {
+  const session = context.sessions.get(sessionId);
+  if (!session || session.listId !== listId) invalid('FORBIDDEN', 'The list session is not active.', 403);
+  return session;
+}
+
 function participantList(list: ShoppingList): Participant[] {
   return Object.values(list.members).map((member) => ({
     clientId: member.clientId,
@@ -259,14 +260,6 @@ function toAck(result: ReturnType<Store['applyOperation']>) {
   };
 }
 
-function assertSession(context: RpcContext, listId: string, sessionId: string, clientId?: string): RpcSession {
-  const session = context.sessions.get(sessionId);
-  if (!session || session.listId !== listId || (clientId !== undefined && session.clientId !== clientId)) {
-    invalid('FORBIDDEN', 'The list session is not active.', 403);
-  }
-  return session;
-}
-
 export function publishPresence(context: RpcContext, listId: string): void {
   const list = context.store.getList(listId);
   if (!list) return;
@@ -278,58 +271,34 @@ export function publishPresence(context: RpcContext, listId: string): void {
   });
 }
 
-function publishMutation(context: RpcContext, listId: string, result: ReturnType<Store['applyOperation']>, actor: Participant): void {
-  if (result.terminal) {
-    context.publisher.publish(listId, {
-      kind: 'list-closed',
-      protocolVersion: PROTOCOL_VERSION,
-      reason: 'deleted',
-    });
-    context.publisher.close(listId);
-    context.sessions.closeList(listId);
-    return;
-  }
-  if (result.ack.status !== 'accepted' || !result.list) return;
-  context.publisher.publish(listId, {
-    kind: 'state',
-    protocolVersion: PROTOCOL_VERSION,
-    snapshot: snapshot(context.store, listId),
-    actor,
-  });
-}
-
-async function applyMutation(
-  context: RpcContext,
+async function runMutationProcedure(
+  workflow: ListMutationWorkflow,
   input: { listId: string; sessionId: string; clientId: string; operationId: string },
   kind: OperationKind,
   payload: Record<string, unknown>,
-) {
-  const session = assertSession(context, input.listId, input.sessionId, input.clientId);
-  const operation: StoreOperation = {
-    operationId: input.operationId,
-    kind,
-    payload,
-    actorClientId: session.clientId,
-    actorName: session.name,
-    protocolVersion: PROTOCOL_VERSION,
-  };
-  let result: ReturnType<Store['applyOperation']>;
+): Promise<ReturnType<typeof toAck>> {
   try {
-    result = await runListMutation(context.effectLayer, input.listId, operation);
-  } catch {
-    console.error('[rpc] persistence failure');
+    const result = await workflow.apply({ ...input, kind, payload });
+    return toAck(result);
+  } catch (error) {
+    if (error instanceof InactiveListSessionError) {
+      invalid('FORBIDDEN', error.message, 403);
+    }
+    if (error instanceof PersistenceError) {
+      console.error('[rpc] persistence failure:', error.cause);
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        status: 500,
+        message: 'The list is temporarily unavailable.',
+        data: { code: 'INTERNAL_SERVER_ERROR', message: 'The list is temporarily unavailable.', retryable: true },
+      });
+    }
+    console.error('[rpc] unexpected mutation failure:', error);
     throw new ORPCError('INTERNAL_SERVER_ERROR', {
       status: 500,
       message: 'The list is temporarily unavailable.',
       data: { code: 'INTERNAL_SERVER_ERROR', message: 'The list is temporarily unavailable.', retryable: true },
     });
   }
-  const ack = toAck(result);
-  if (!result.duplicate && result.notification) {
-    void context.dispatcher.dispatch(result.notification, result.notificationRecipients);
-  }
-  if (!result.duplicate) publishMutation(context, input.listId, result, session.participant);
-  return ack;
 }
 
 /** Build the server implementation while keeping the shared package contract-only. */
@@ -343,7 +312,37 @@ export interface RpcDependencies {
 
 export function createRpcRouter(deps: RpcDependencies) {
   const effectLayer = makeProcessLayer(deps.store, (listId, event) => deps.publisher.publish(listId, event));
-  const context = { ...deps, effectLayer } satisfies RpcContext;
+  const mutationWorkflow = createListMutationWorkflow({
+    sessions: deps.sessions,
+    dispatcher: deps.dispatcher,
+    effectLayer,
+    protocolVersion: PROTOCOL_VERSION,
+    effects: {
+      publishState(listId, result, actor) {
+        if (!result.list) return;
+        deps.publisher.publish(listId, {
+          kind: 'state',
+          protocolVersion: PROTOCOL_VERSION,
+          snapshot: snapshot(deps.store, listId),
+          actor,
+        });
+      },
+      publishClosed(listId) {
+        deps.publisher.publish(listId, {
+          kind: 'list-closed',
+          protocolVersion: PROTOCOL_VERSION,
+          reason: 'deleted',
+        });
+      },
+      closePublisher(listId) {
+        deps.publisher.close(listId);
+      },
+      closeSessions(listId) {
+        deps.sessions.closeList(listId);
+      },
+    },
+  });
+  const context = { ...deps, mutationWorkflow } satisfies RpcContext;
   // Dependencies are captured once in process-scoped layers. The oRPC
   // request context intentionally remains empty so transport adapters cannot
   // become a second dependency-injection system.
@@ -366,9 +365,9 @@ export function createRpcRouter(deps: RpcDependencies) {
         };
       }),
       leave: implementer.list.leave.handler(({ input }) => ({ left: context.store.leaveMember(input.listId, input.clientId) })),
-      clear: implementer.list.clear.handler(({ input }) => applyMutation(context, input, 'list:clear', {})),
-      rename: implementer.list.rename.handler(({ input }) => applyMutation(context, input, 'list:rename', { name: input.name })),
-      delete: implementer.list.delete.handler(({ input }) => applyMutation(context, input, 'list:delete', { ownerToken: input.ownerToken })),
+      clear: implementer.list.clear.handler(({ input }) => runMutationProcedure(context.mutationWorkflow, input, 'list:clear', {})),
+      rename: implementer.list.rename.handler(({ input }) => runMutationProcedure(context.mutationWorkflow, input, 'list:rename', { name: input.name })),
+      delete: implementer.list.delete.handler(({ input }) => runMutationProcedure(context.mutationWorkflow, input, 'list:delete', { ownerToken: input.ownerToken })),
     },
     push: {
       config: implementer.push.config.handler(() => ({ publicKey: deps.publicKey || null, available: Boolean(deps.publicKey) })),
@@ -457,13 +456,13 @@ export function createRpcRouter(deps: RpcDependencies) {
       }),
     },
     item: {
-      add: implementer.item.add.handler(({ input }) => applyMutation(context, input, 'item:add', {
+      add: implementer.item.add.handler(({ input }) => runMutationProcedure(context.mutationWorkflow, input, 'item:add', {
         name: input.name,
         amount: input.amount || '',
         ...(input.tempItemId ? { tempItemId: input.tempItemId } : {}),
       })),
-      update: implementer.item.update.handler(({ input }) => applyMutation(context, input, 'item:update', { id: input.id, patch: input.patch })),
-      delete: implementer.item.delete.handler(({ input }) => applyMutation(context, input, 'item:delete', { id: input.id }))
+      update: implementer.item.update.handler(({ input }) => runMutationProcedure(context.mutationWorkflow, input, 'item:update', { id: input.id, patch: input.patch })),
+      delete: implementer.item.delete.handler(({ input }) => runMutationProcedure(context.mutationWorkflow, input, 'item:delete', { id: input.id }))
     },
   });
 }

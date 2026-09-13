@@ -28,6 +28,10 @@ _Avoid_: event ID, notification history
 The identity of one participant-requested list mutation, retained when delivery is retried so the same mutation is not applied twice.
 _Avoid_: request ID, message ID
 
+**List mutation**:
+One participant-requested attempt to change accepted list state, identified by an Operation ID. It may be accepted and advance the list revision or rejected without changing accepted state.
+_Avoid_: list operation, command
+
 **List activity notification**:
 A brief push alert about an accepted list mutation or a participant joining, intended to bring an unavailable participant back to the list rather than serve as a history of changes.
 _Avoid_: audit log, activity history

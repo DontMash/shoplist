@@ -186,6 +186,88 @@ describe('oRPC transport boundary', () => {
     expect(await response.json()).toMatchObject({ json: { code: 'INTERNAL_SERVER_ERROR', message: 'The list is temporarily unavailable.' } });
   });
 
+  it('keeps the committed mutation acknowledgement when state publication fails', async () => {
+    const resources = await resource();
+    const created = await rpc<{ list: { id: string } }>(resources, '/list/create', { name: 'Publication failure' });
+    const opened = await rpc<{ sessionId: string }>(resources, '/listSession/open', {
+      listId: created.list.id, clientId: 'client-a', name: 'Alice', protocolVersion: 1,
+    });
+    const publish = vi.spyOn(resources.rpcPublisher, 'publish');
+    const originalPublish = publish.getMockImplementation();
+    publish.mockImplementation((listId, event) => {
+      if (event.kind === 'state') throw new Error('publisher unavailable');
+      return originalPublish ? originalPublish(listId, event) : '0';
+    });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const ack = await rpc<{ status: string; revision: number }>(resources, '/item/add', {
+      listId: created.list.id,
+      sessionId: opened.sessionId,
+      clientId: 'client-a',
+      operationId: 'publication-failure',
+      name: 'Milk',
+    });
+
+    expect(ack).toMatchObject({ status: 'accepted', revision: 1 });
+    expect(resources.store.getList(created.list.id)).toMatchObject({ revision: 1, items: [{ name: 'Milk' }] });
+    expect(errorLog).toHaveBeenCalledWith('[list-mutation] state publication failed:', expect.any(Error));
+    errorLog.mockRestore();
+  });
+
+  it('keeps the committed terminal acknowledgement when list closure publication fails', async () => {
+    const resources = await resource();
+    const created = await rpc<{ list: { id: string }; ownerToken: string }>(resources, '/list/create', { name: 'Terminal publication failure' });
+    const opened = await rpc<{ sessionId: string }>(resources, '/listSession/open', {
+      listId: created.list.id, clientId: 'client-a', name: 'Alice', protocolVersion: 1,
+    });
+    const publish = vi.spyOn(resources.rpcPublisher, 'publish');
+    const originalPublish = publish.getMockImplementation();
+    publish.mockImplementation((listId, event) => {
+      if (event.kind === 'list-closed') throw new Error('publisher unavailable');
+      return originalPublish ? originalPublish(listId, event) : '0';
+    });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const ack = await rpc<{ status: string; revision: number }>(resources, '/list/delete', {
+      listId: created.list.id,
+      sessionId: opened.sessionId,
+      clientId: 'client-a',
+      operationId: 'terminal-publication-failure',
+      ownerToken: created.ownerToken,
+    });
+
+    expect(ack).toMatchObject({ status: 'accepted', revision: 1 });
+    expect(resources.store.getList(created.list.id)).toBeNull();
+    expect(resources.rpcSessions.online(created.list.id)).toEqual([]);
+    expect(errorLog).toHaveBeenCalledWith('[list-mutation] terminal outcome publication failed:', expect.any(Error));
+    errorLog.mockRestore();
+  });
+
+  it('keeps the committed acknowledgement when notification handoff fails', async () => {
+    const resources = await resource();
+    const created = await rpc<{ list: { id: string } }>(resources, '/list/create', { name: 'Notification failure' });
+    const opened = await rpc<{ sessionId: string }>(resources, '/listSession/open', {
+      listId: created.list.id, clientId: 'client-a', name: 'Alice', protocolVersion: 1,
+    });
+    vi.spyOn(resources.dispatcher, 'dispatch').mockImplementation(() => {
+      throw new Error('notification unavailable');
+    });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const ack = await rpc<{ status: string; revision: number }>(resources, '/item/add', {
+      listId: created.list.id,
+      sessionId: opened.sessionId,
+      clientId: 'client-a',
+      operationId: 'notification-failure',
+      name: 'Milk',
+    });
+
+    expect(ack).toMatchObject({ status: 'accepted', revision: 1 });
+    expect(resources.store.getList(created.list.id)).toMatchObject({ revision: 1, items: [{ name: 'Milk' }] });
+    expect(errorLog).toHaveBeenCalledWith('[list-mutation] notification dispatch failed:', expect.any(Error));
+    errorLog.mockRestore();
+  });
+
   it('returns an explicit upgrade-required failure rather than starting an endless retry', async () => {
     const resources = await resource();
     const created = await rpc<{ list: { id: string } }>(resources, '/list/create', { name: 'Versioned' });

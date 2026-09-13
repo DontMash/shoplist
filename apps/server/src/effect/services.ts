@@ -29,10 +29,12 @@ export const ClockService = Context.GenericTag<ClockServiceShape>('@shoplist/Clo
 export const PublisherService = Context.GenericTag<PublisherServiceShape>('@shoplist/PublisherService');
 export const ListSessionService = Context.GenericTag<ListSessionServiceShape>('@shoplist/ListSessionService');
 
-/** Process-scoped services used by the first Effect slice. */
-export function makeProcessLayer(store: Store, publish: PublisherServiceShape['publish']): Layer.Layer<
+export type ProcessLayer = Layer.Layer<
   StoreServiceShape | ClockServiceShape | PublisherServiceShape | ListSessionServiceShape
-> {
+>;
+
+/** Process-scoped services used by the first Effect slice. */
+export function makeProcessLayer(store: Store, publish: PublisherServiceShape['publish']): ProcessLayer {
   const storeLayer = Layer.succeed(StoreService, {
     // This adapter is deliberately Effect.try rather than a promise wrapper:
     // better-sqlite3 blocks the event loop and the API documents that fact.
