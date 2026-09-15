@@ -7,8 +7,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
-    "start": "node dist/server.js",
-    "dev": "tsx watch src/server.ts",
+    "start": "node --env-file-if-exists=../../.env dist/server.js",
+    "dev": "node --env-file-if-exists=../../.env --import tsx/esm --watch src/server.ts",
     "test": "vitest run --coverage",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest"
@@ -25,7 +25,6 @@
     "@shoplist/transport-contract": "workspace:*",
     "@t3-oss/env-core": "^0.13.11",
     "better-sqlite3": "^13.0.3",
-    "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "effect": "^3.22.2",
     "hono": "^4.13.5",

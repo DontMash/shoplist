@@ -6,7 +6,7 @@
   "description": "Shared shopping lists with realtime sync - invite-only via QR code/link, no accounts required.",
   "packageManager": "pnpm@11.20.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19.0"
   },
   "scripts": {
     "build": "pnpm --filter @shoplist/server build && pnpm --filter @shoplist/web build",

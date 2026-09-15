@@ -60,8 +60,8 @@ pnpm dev           # starts the backend and Vite frontend together
 ```
 
 For local configuration, copy `.env.example` to `.env` at the repository root.
-The server also accepts `apps/server/.env`; shell, container, and CI environment
-variables take precedence over both files.
+Shell, container, and CI environment variables take precedence over the local
+file.
 
 To run them in separate terminals:
 
@@ -71,11 +71,11 @@ pnpm --filter @shoplist/web dev         # Vite frontend on http://localhost:5173
 ```
 
 Vite proxies the OpenAPI transport at `/api` and the native oRPC endpoint at
-`/rpc` to the backend during development. The server
-loads a local `.env` file when present and validates the values with t3-env;
-shell, container, and CI environment values retain precedence over that file.
-For a production-like local run, build the frontend first and then start the
-Node server:
+`/rpc` to the backend during development. The server loads the repository-root
+`.env` file through Node's native environment-file support when present and
+validates the values with t3-env; shell, container, and CI environment values
+retain precedence over that file. For a production-like local run, build the
+frontend first and then start the Node server:
 
 ```bash
 pnpm build          # typechecks/compiles the server and builds the web app
