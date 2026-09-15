@@ -1,0 +1,1 @@
+ALTER TABLE `processed_operations` ADD `payload_hash` text;

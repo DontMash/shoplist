@@ -1,0 +1,1 @@
+ALTER TABLE `items` ADD `last_edited_by` text;

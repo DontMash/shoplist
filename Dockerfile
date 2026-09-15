@@ -38,6 +38,7 @@ RUN mkdir -p /app/data && chown -R node:node /app/data
 
 COPY --from=build /app/deploy ./
 COPY --from=build /app/apps/server/dist ./dist
+COPY --from=build /app/apps/server/migrations ./migrations
 COPY --from=build /app/apps/web/dist ./public-dist
 # Keep the immutable PWA source assets available for PUBLIC_DIR overrides.
 COPY --from=build /app/apps/web/public ./public

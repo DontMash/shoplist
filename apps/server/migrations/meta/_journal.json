@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1789334605027,
+      "tag": "0000_condemned_radioactive_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1789334606416,
+      "tag": "0001_melted_ben_grimm",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789334607832,
+      "tag": "0002_skinny_skaar",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1789334609316,
+      "tag": "0003_stale_luke_cage",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1789334610756,
+      "tag": "0004_premium_natasha_romanoff",
+      "breakpoints": true
+    }
+  ]
+}

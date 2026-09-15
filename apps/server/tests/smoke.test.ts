@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { access, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import SQLiteDatabase from 'better-sqlite3';
 import os from 'node:os';
 import path from 'node:path';
@@ -226,53 +226,11 @@ describe('Store', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it('migrates an existing SQLite database with no last-editor column', async () => {
+  it('migrates an existing SQLite database from the pre-journal schema', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-sqlite-migration-'));
     const file = path.join(directory, 'db.sqlite');
     const sqlite = new SQLiteDatabase(file);
-    sqlite.exec(`
-      CREATE TABLE lists (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        owner_token TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        cleared_at INTEGER
-      );
-      CREATE TABLE items (
-        id TEXT PRIMARY KEY NOT NULL,
-        list_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        amount TEXT NOT NULL DEFAULT '',
-        collected INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        by TEXT
-      );
-      CREATE TABLE members (
-        list_id TEXT NOT NULL,
-        client_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        color TEXT NOT NULL,
-        joined_at INTEGER NOT NULL,
-        PRIMARY KEY (list_id, client_id)
-      );
-      CREATE TABLE processed_operations (
-        list_id TEXT NOT NULL,
-        operation_id TEXT NOT NULL,
-        status TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        response_json TEXT NOT NULL,
-        processed_at INTEGER NOT NULL,
-        PRIMARY KEY (list_id, operation_id)
-      );
-      INSERT INTO lists (id, name, owner_token, created_at) VALUES ('legacy', 'Legacy', 'owner', 1);
-      INSERT INTO items (id, list_id, name, created_at, updated_at, by)
-        VALUES ('item', 'legacy', 'Bread', 1, 1, 'client-a');
-      INSERT INTO members (list_id, client_id, name, color, joined_at)
-        VALUES ('legacy', 'client-a', 'Alice', '#123456', 1);
-      INSERT INTO processed_operations (list_id, operation_id, status, revision, response_json, processed_at)
-        VALUES ('legacy', 'old-operation', 'accepted', 0, '{}', 1);
-    `);
+    sqlite.exec(await readFile(new URL('./fixtures/pre-journal.sql', import.meta.url), 'utf8'));
     sqlite.close();
 
     const store = new Store(file);
@@ -282,88 +240,65 @@ describe('Store', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it('imports malformed legacy records without trusting their shape', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-malformed-'));
-    const file = path.join(directory, 'db.json');
-    await writeFile(file, JSON.stringify({
-      lists: {
-        nullList: null,
-        primitiveList: 'not a list',
-        arrayList: [],
-        fallback: {
-          name: null, ownerToken: null, createdAt: 'bad', clearedAt: 'bad',
-          items: [null, 'bad item', [], {}, { id: 42, name: ' Valid ', amount: 42, collected: 1, by: '' }],
-          members: {
-            '': { clientId: '', name: 'ignored', color: '#000', joinedAt: 1 },
-            empty: null,
-            primitive: 'bad member',
-            array: [],
-            fallback: { clientId: '', name: ' ', color: '', joinedAt: 'bad' },
-          },
-        },
-        'bad/key': { id: 'bad/id', name: 'Generated ID', items: [], members: {} },
-      },
-    }));
-    const store = new Store(file);
-    const list = store.getList('fallback');
-    expect(list).toMatchObject({ name: 'Shopping list', ownerToken: expect.any(String) });
-    expect(list?.items).toHaveLength(1);
-    expect(list?.items[0]).toMatchObject({ name: 'Valid', collected: true, by: null, lastEditedBy: null });
-    expect(list?.members).toEqual({
-      fallback: expect.objectContaining({ name: 'Guest', color: '#888888' }),
+  it('recognizes the supported pre-journal schema versions', () => {
+    const infer = (catalog: Array<{ name: string; sql: string | null }>): number =>
+      (Store.prototype as any).inferMigrationCount(catalog, snapshots);
+    const snapshot = (tables: Record<string, string[]>) => ({
+      tables: Object.fromEntries(Object.entries(tables).map(([name, columns]) => [
+        name, { columns: Object.fromEntries(columns.map((column) => [column, {}])) },
+      ])),
     });
-    expect(store.listCount()).toBe(2);
-    expect(store.getList('bad/key')).toBeNull();
-    store.close();
-    await rm(directory, { recursive: true, force: true });
+    const snapshots = [
+      snapshot({ lists: ['id'], items: ['id'], members: ['id'] }),
+      snapshot({ lists: ['id', 'revision'], items: ['id'], members: ['id'], processed_operations: ['operation_id'] }),
+      snapshot({ lists: ['id', 'revision'], items: ['id', 'last_edited_by'], members: ['id'], processed_operations: ['operation_id'] }),
+      snapshot({
+        lists: ['id', 'revision'], items: ['id', 'last_edited_by'], members: ['id', 'left_at'],
+        processed_operations: ['operation_id'], push_destinations: ['id'],
+      }),
+      snapshot({
+        lists: ['id', 'revision'], items: ['id', 'last_edited_by'], members: ['id', 'left_at'],
+        processed_operations: ['operation_id', 'payload_hash'], push_destinations: ['id'],
+      }),
+    ];
+    const catalog = (overrides: Record<string, string | null> = {}) => [
+      { name: 'lists', sql: overrides.lists ?? 'id' },
+      { name: 'items', sql: overrides.items ?? 'id' },
+      { name: 'members', sql: overrides.members ?? 'id' },
+      ...Object.entries(overrides)
+        .filter(([name]) => !['lists', 'items', 'members'].includes(name))
+        .map(([name, sql]) => ({ name, sql })),
+    ];
+
+    expect(infer(catalog())).toBe(1);
+    expect(infer(catalog({ processed_operations: 'operation_id', lists: 'id revision' }))).toBe(2);
+    expect(infer(catalog({
+      processed_operations: 'operation_id', lists: 'id revision', items: 'id last_edited_by',
+    }))).toBe(3);
+    expect(infer(catalog({
+      processed_operations: 'operation_id', lists: 'id revision', items: 'id last_edited_by',
+      members: 'id left_at', push_destinations: 'id',
+    }))).toBe(4);
+    expect(infer(catalog({
+      processed_operations: 'operation_id payload_hash', lists: 'id revision', items: 'id last_edited_by',
+      members: 'id left_at', push_destinations: 'id',
+    }))).toBe(5);
+    expect(infer(catalog({
+      processed_operations: 'operation_id', lists: 'id revision', items: 'id last_edited_by',
+      push_destinations: 'id',
+    }))).toBe(3);
+    expect(() => infer([{ name: 'lists', sql: 'id' }])).toThrow('does not match');
+    expect(() => infer(catalog({ processed_operations: 'operation_id', lists: 'id', items: '' }))).toThrow('does not match');
   });
 
-  it('backs up invalid JSON and migrates SQLite files with the old JSON name', async () => {
-    const invalidDirectory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-invalid-'));
-    const invalidFile = path.join(invalidDirectory, 'db.json');
-    await writeFile(invalidFile, '{not-json');
-    const invalidStore = new Store(invalidFile);
-    expect(invalidStore.listCount()).toBe(0);
-    invalidStore.close();
-    expect((await readdir(invalidDirectory)).some((name) => name.startsWith('db.json.legacy-'))).toBe(true);
-
-    const brokenStore = new Store(path.join(invalidDirectory, 'broken.sqlite'));
+  it('reports a failed WAL checkpoint without masking shutdown', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-checkpoint-'));
+    const store = new Store(path.join(directory, 'db.sqlite'));
     const checkpointError = vi.spyOn(console, 'error').mockImplementation(() => {});
-    (brokenStore as any).sqlite.close();
-    brokenStore.flushSync();
+    (store as any).sqlite.close();
+    store.flushSync();
     expect(checkpointError).toHaveBeenCalledWith('[store] checkpoint failed:', expect.any(String));
     checkpointError.mockRestore();
-    await rm(invalidDirectory, { recursive: true, force: true });
-
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-old-sqlite-name-'));
-    const oldFile = path.join(directory, 'db.json');
-    const oldStore = new Store(oldFile);
-    const oldList = oldStore.createList('Old SQLite');
-    oldStore.close();
-    const newFile = path.join(directory, 'db.sqlite');
-    const migratedStore = new Store(newFile);
-    expect(await fileExists(oldFile)).toBe(false);
-    expect(migratedStore.getList(oldList.id)?.name).toBe('Old SQLite');
-    migratedStore.close();
-    await rm(directory, { recursive: true, force: true });
-  });
-
-  it('migrates the removed shopped flag when loading old data', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'shoplist-migration-'));
-    const file = path.join(directory, 'db.json');
-    await writeFile(file, JSON.stringify({
-      lists: {
-        legacy: {
-          id: 'legacy', name: 'Legacy', ownerToken: 'owner', createdAt: 1,
-          clearedAt: null, members: {},
-          items: [{ id: 'item', name: 'Bread', amount: '', shopped: true, collected: 0 }],
-        },
-      },
-    }));
-    const store = new Store(file);
-    expect(store.getList('legacy')?.items[0]).not.toHaveProperty('shopped');
-    expect(store.getList('legacy')?.items[0].collected).toBe(false);
-    store.close();
     await rm(directory, { recursive: true, force: true });
   });
 });
@@ -416,7 +351,7 @@ describe('Hono application and native realtime boundaries', () => {
         host: '127.0.0.1',
         port: 0,
         buildId: 'test-build',
-        dataFile: path.join(directory, 'db.json'),
+        dataFile: path.join(directory, 'db.sqlite'),
         publicDir: path.join(directory, 'public'),
         onListening: (port) => {
           base = `http://127.0.0.1:${port}`;
@@ -552,13 +487,4 @@ function close(socket: WebSocket): Promise<void> {
     socket.once('close', () => resolve());
     socket.close();
   });
-}
-
-async function fileExists(file: string): Promise<boolean> {
-  try {
-    await access(file);
-    return true;
-  } catch {
-    return false;
-  }
 }

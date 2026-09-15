@@ -11,7 +11,9 @@
     "dev": "node --env-file-if-exists=../../.env --import tsx/esm --watch src/server.ts",
     "test": "vitest run --coverage",
     "test:coverage": "vitest run --coverage",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
+    "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
@@ -40,6 +42,7 @@
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.1.11",
+    "drizzle-kit": "^0.31.10",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"

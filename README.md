@@ -125,12 +125,12 @@ pnpm start          # serves the Vite build on port 3000
 - **Storage** — a SQLite database (`data/db.sqlite`) accessed through Drizzle ORM
   and the `better-sqlite3` adapter. `store.ts` is the application repository, not
   a second database: it owns the Drizzle connection, validates domain operations,
-  maintains the in-memory projection used by WebSocket broadcasts, and handles
-  SQLite/legacy-JSON lifecycle and migration. Lists, items, and members have
-  separate tables with foreign keys and indexes; each mutation is committed
-  transactionally. The first startup automatically imports the former `db.json`
-  format and keeps a timestamped `.legacy-*` backup. Back up the SQLite file or
-  mount `data` as a volume.
+  maintains the in-memory projection used by WebSocket broadcasts, and applies
+  the committed Drizzle Kit migrations from `apps/server/migrations/`. Lists,
+  items, and members have separate tables with foreign keys and indexes; each
+  mutation is committed transactionally. Existing SQLite installations are
+  adopted into the migration journal and upgraded without losing their data.
+  Back up the SQLite file or mount `data` as a volume.
 - **Ownership** — the creator of a list receives an `ownerToken` (stored on
   their device only). It is required to delete the list; clearing is open to
   all members (with confirmation).
@@ -162,7 +162,7 @@ pnpm start          # serves the Vite build on port 3000
   Set the resulting public and private keys as `VAPID_PUBLIC_KEY` and
   `VAPID_PRIVATE_KEY`, and set `VAPID_SUBJECT` to a contact URI. Push delivery is
   otherwise unavailable, but realtime list synchronization continues to work.
-- To start over, delete the volume / `data/db.sqlite` (and any `.legacy-*` backup).
+- To start over, delete the volume / `data/db.sqlite`.
 
 ## Testing
 
@@ -171,6 +171,10 @@ pnpm build
 pnpm start &        # run the server
 pnpm test           # Vitest suites + text/HTML coverage reports
 pnpm icons          # regenerate PNG icons (TypeScript script)
+
+# schema workflow (from the repository root)
+pnpm --filter @shoplist/server db:generate
+pnpm --filter @shoplist/server db:migrate
 ```
 
 `pnpm test` runs the Vitest suites for the transport contract, server, and web
@@ -179,6 +183,11 @@ statements, functions, and branches are all at least 90%; reports are written to
 `apps/server/coverage/` (ignored generated output).
 The root `vitest.config.ts` owns that shared policy; the app configs
 only select their required runtime (`node` versus `jsdom`) and frontend setup.
+
+`apps/server/src/db/schema.ts` is the only hand-maintained application schema.
+After changing it, run `db:generate`, review the generated migration, and commit
+both the migration SQL and its metadata. Do not edit generated migrations or add
+schema DDL to application code.
 
 TypeScript options shared by both apps live in the root `tsconfig.json`. Each app
 still has a thin config because a Node server needs `NodeNext` while the Vite
@@ -193,7 +202,10 @@ apps/server/src/rpc.ts             oRPC implementation, event publisher, and ses
 apps/server/src/openapi.ts         OpenAPI document generated from the shared contract
 apps/server/src/effect/services.ts Effect Store/Clock/Publisher/ListSession layers
 apps/server/src/store.ts          Drizzle repository/cache + idempotent domain operations
-apps/server/src/db/schema.ts       Drizzle SQLite table definitions
+apps/server/src/db/schema.ts       Authoritative Drizzle SQLite table definitions
+apps/server/src/db/migrations.ts   Drizzle migration journal/catalog definitions
+apps/server/drizzle.config.ts      Drizzle Kit configuration
+apps/server/migrations/            Generated, committed schema migrations
 packages/transport-contract/src/index.ts Shared oRPC/Zod wire contract and protocol errors
 apps/server/tests/smoke.test.ts   Vitest unit, migration, and HTTP seam suite
 apps/server/tests/openapi.test.ts OpenAPI, SSE, documentation, and route-removal suite

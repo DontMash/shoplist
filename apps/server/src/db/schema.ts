@@ -1,4 +1,4 @@
-import { integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 /**
  * The durable shoplist schema.  Lists, items, and members are separate rows so
@@ -25,7 +25,10 @@ export const processedOperations = sqliteTable('processed_operations', {
   payloadHash: text('payload_hash'),
   terminal: integer('terminal', { mode: 'boolean' }).notNull().default(false),
   processedAt: integer('processed_at').notNull(),
-}, (table) => [primaryKey({ columns: [table.listId, table.operationId] })]);
+}, (table) => [
+  primaryKey({ columns: [table.listId, table.operationId] }),
+  index('processed_operations_processed_at_idx').on(table.processedAt),
+]);
 
 export const items = sqliteTable('items', {
   id: text('id').primaryKey(),
@@ -37,7 +40,7 @@ export const items = sqliteTable('items', {
   updatedAt: integer('updated_at').notNull(),
   by: text('by'),
   lastEditedBy: text('last_edited_by'),
-});
+}, (table) => [index('items_list_id_idx').on(table.listId)]);
 
 export const members = sqliteTable('members', {
   listId: text('list_id').notNull().references(() => lists.id, { onDelete: 'cascade' }),
