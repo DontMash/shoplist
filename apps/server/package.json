@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
     "start": "node --env-file-if-exists=../../.env dist/server.js",
-    "dev": "node --env-file-if-exists=../../.env --import tsx/esm --watch src/server.ts",
+    "dev": "node --conditions=development --env-file-if-exists=../../.env --import tsx/esm --watch src/server.ts",
     "test": "vitest run --coverage",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",

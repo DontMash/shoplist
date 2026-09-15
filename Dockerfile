@@ -16,11 +16,14 @@ RUN pnpm install --frozen-lockfile
 COPY apps/web ./apps/web
 COPY apps/server ./apps/server
 COPY packages/transport-contract ./packages/transport-contract
+RUN pnpm --filter @shoplist/transport-contract build
 RUN pnpm --filter @shoplist/server build
 RUN pnpm --filter @shoplist/web build
 
 # Keep only the backend and its production dependencies for the runtime image.
-RUN pnpm --filter @shoplist/server deploy --prod --legacy /app/deploy
+# Injected workspace packages stay inside the deploy tree, so their links remain
+# valid when the tree is copied to a different path in the runtime stage.
+RUN pnpm --filter @shoplist/server deploy --prod /app/deploy
 
 # ---- runtime stage ----------------------------------------------------------
 FROM node:24-alpine

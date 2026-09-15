@@ -9,7 +9,7 @@
     "node": ">=20.19.0"
   },
   "scripts": {
-    "build": "pnpm --filter @shoplist/server build && pnpm --filter @shoplist/web build",
+    "build": "pnpm -r --if-present build",
     "start": "pnpm --filter @shoplist/server start",
     "dev": "pnpm --parallel --filter @shoplist/web --filter @shoplist/server dev",
     "dev:server": "pnpm --filter @shoplist/server dev",
